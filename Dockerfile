@@ -26,8 +26,11 @@ ENV PYTHONUNBUFFERED=1 \
     MTR_LOG_LEVEL=INFO
 
 # ffmpeg нужен аудиоядру. Один слой с очисткой apt-списков.
+# libwebp*: колёса armv7 (piwheels) линкуются динамически к системным libwebp.so.7 и другим.
+# Без них PIL._webp не импортируется, и Pillow пишет ?WEBP support not installed?.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
+        libwebp7 libwebpmux3 libwebpdemux2 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

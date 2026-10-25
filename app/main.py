@@ -79,8 +79,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_throttle = AuthThrottle()
     app.state.library_repo = ctx.library
     # Фоновый прогрев обложек: одна задача на процесс, запускается через API.
-    from app.covers.warmer import CoverWarmer
-    app.state.warmer = CoverWarmer(ctx.covers, ctx.stream_service.limiter)
 
     # Предупреждаем громко: если volume не проброшен, библиотека будет пустой.
     if not settings.music_dir.exists():
@@ -117,7 +115,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await app.state.warmer.shutdown()
         if ctx.watcher is not None:
             await ctx.watcher.stop()
         await ctx.close()

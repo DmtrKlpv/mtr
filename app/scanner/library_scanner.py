@@ -89,10 +89,16 @@ class Scanner:
         *,
         on_progress: ProgressCallback | None = None,
         parse_concurrency: int = PARSE_CONCURRENCY,
+        on_scan_start: Callable[[str], None] | None = None,
+        on_scan_done: Callable[[str], None] | None = None,
     ) -> None:
         self._repo = repo
         self._root = Path(music_root)
         self._on_progress = on_progress
+        # Синхронные хуки: вызываются в начале скана (mode) и после успешного
+        # завершения. Ошибки в хуке не должны ломать скан.
+        self._on_scan_start = on_scan_start
+        self._on_scan_done = on_scan_done
         self._lock = asyncio.Lock()
         self._cancelled = False
         # Меняется из настроек: на слабом CPU меньше параллельных чтений даёт
@@ -125,9 +131,21 @@ class Scanner:
         if mode not in ("full", "incremental", "watch"):
             raise ValueError(f"недопустимый режим: {mode!r}")
 
+        if self._on_scan_start is not None:
+            self._safe_hook(self._on_scan_start, mode)
         async with self._lock:
             self._cancelled = False
-            return await self._scan_locked(mode, paths=paths)
+            result = await self._scan_locked(mode, paths=paths)
+        if self._on_scan_done is not None:
+            self._safe_hook(self._on_scan_done, mode)
+        return result
+
+    @staticmethod
+    def _safe_hook(hook: Callable[[str], None], mode: str) -> None:
+        try:
+            hook(mode)
+        except Exception:  # noqa: BLE001 - хук не должен валить скан
+            logger.exception("хук скана упал")
 
     # ------------------------------------------------------------------
     # Внутренняя реализация

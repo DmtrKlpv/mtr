@@ -322,9 +322,8 @@ function closeMenu() {
 
 /* ---------- Библиотека ---------- */
 async function renderLibrary(view) {
-  // Пока идёт скан, главная показывает подробный статус вместо «Загрузка…»:
-  // до конца индексации основному интерфейсу нечего отрисовать.
-  if (await scanGate(view)) return;
+  // Главная открывается сразу, даже во время скана: уже отсканированные альбомы
+  // видны и доступны. Панель прогресса (скан и обложки) — сверху, см. mountHomeActivity.
 
   const trackList = el('div', { class: 'list' });
 
@@ -371,6 +370,7 @@ async function renderLibrary(view) {
   view.replaceChildren(
     el('h1', { class: 'greeting' }, `Привет, ${state.user}!`),
     el('div', { class: 'row' }, search, rescanButton()),
+    homeActivityBox(),
     trackList,
     summary,
     el('div', { id: 'home-sections' }),
@@ -389,6 +389,9 @@ async function renderLibrary(view) {
   if (state.libraryView === 'artists') await renderArtistsInto(body);
   else if (state.libraryView === 'playlists') await renderPlaylistsInto(body);
   else await renderAlbumsInto(body);
+
+  // Панель активности: если сервер занят, показываем прогресс и опрашиваем его.
+  mountHomeActivity().catch(() => {});
 }
 
 // Счётчики под приветствием: отдельный запрос, чтобы не блокировать сетку.
@@ -571,9 +574,9 @@ function rescanButton() {
       button.disabled = true;
       button.textContent = 'Сканирую…';
       try {
-        const result = await api('/api/web/scan', { method: 'POST' });
-        toast(`Просмотрено ${result.seen}, добавлено ${result.added}`, 'ok');
-        setView('library');
+        await api('/api/web/scan', { method: 'POST' });
+        toast('Сканирование запущено', 'ok');
+        setView('library');   // панель прогресса появится на главной
       } catch (error) {
         toast(error.message, 'error');
       } finally {
@@ -1432,82 +1435,12 @@ async function renderUsers(view) {
 }
 
 /* ---------- Сервер (admin) ---------- */
-let warmPollTimer = null;
-
-function stopWarmPolling() {
-  if (warmPollTimer) {
-    clearInterval(warmPollTimer);
-    warmPollTimer = null;
-  }
-}
-
-// Текстовые метки состояния прогрева. current_album показываем отдельно,
-// чтобы не плодить варианты строки на каждое состояние.
-const WARM_STATE_LABELS = {
-  idle: 'Готов к запуску',
-  running: 'Идёт прогрев…',
-  waiting: 'Жду освобождения сервера (идёт стриминг или запрос обложки)…',
-  done: 'Завершено',
-  cancelled: 'Остановлено',
-  error: 'Ошибка',
-};
-
-function updateWarmView(status) {
-  const fillNode = document.querySelector('#warm-fill');
-  const infoNode = document.querySelector('#warm-info');
-  const startBtn = document.querySelector('#warm-start');
-  const cancelBtn = document.querySelector('#warm-cancel');
-  if (!fillNode || !infoNode) return;
-
-  const total = status.total || 0;
-  const done = status.done || 0;
-  const percent = total > 0 ? Math.round((done / total) * 100)
-                : (status.state === 'done' ? 100 : 0);
-  fillNode.style.width = `${percent}%`;
-  fillNode.classList.toggle('running', status.state === 'running' || status.state === 'waiting');
-  fillNode.classList.toggle('failed', status.state === 'error');
-
-  const parts = [WARM_STATE_LABELS[status.state] || status.state];
-  if (total) parts.push(`${done} из ${total}`);
-  if (status.made) parts.push(`новых обложек ${status.made}`);
-  if (status.absent) parts.push(`без картинки ${status.absent}`);
-  if (status.failed) parts.push(`ошибок ${status.failed}`);
-  if (status.eta_sec != null && status.state === 'running') {
-    parts.push(`осталось ~${status.eta_sec} с`);
-  }
-  if (status.last_error) parts.push(`последняя ошибка: ${status.last_error}`);
-  infoNode.textContent = parts.join(' · ');
-
-  const running = status.state === 'running' || status.state === 'waiting';
-  if (startBtn) startBtn.disabled = running;
-  if (cancelBtn) cancelBtn.disabled = !running;
-}
-
-function startWarmPolling() {
-  stopWarmPolling();
-  // Прогрев не держит HTTP-запрос — опрашиваем раз в секунду, как скан.
-  warmPollTimer = setInterval(async () => {
-    try {
-      const data = await api('/api/web/covers/warm');
-      if (state.view !== 'server') { stopWarmPolling(); return; }
-      updateWarmView(data);
-      if (data.state !== 'running' && data.state !== 'waiting') {
-        stopWarmPolling();
-      }
-    } catch (error) {
-      stopWarmPolling();
-    }
-  }, 1000);
-}
-
 async function renderServer(view) {
-  stopWarmPolling();
   if (state.role !== 'admin') {
     view.replaceChildren(el('p', { class: 'error' }, 'Только для администратора'));
     return;
   }
   const info = await api('/api/web/server');
-  const warmStatus = await api('/api/web/covers/warm');
 
   const rows = [
     ['Версия', info.version],
@@ -1523,46 +1456,6 @@ async function renderServer(view) {
     ['Треков', info.tracks],
     ['Отсутствующих', info.missing],
   ];
-
-  const warmBar = el('div', { class: 'progress' },
-    el('div', { class: 'progress-fill', id: 'warm-fill' }),
-  );
-  const warmInfo = el('div', { class: 'scan-info', id: 'warm-info' }, 'Загрузка…');
-
-  const warmStartButton = el('button', {
-    id: 'warm-start',
-    class: 'primary',
-    onclick: async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        const data = await api('/api/web/covers/warm', { method: 'POST', body: JSON.stringify({}) });
-        updateWarmView(data);
-        startWarmPolling();
-      } catch (error) {
-        toast(error.message, 'error');
-        button.disabled = false;
-      }
-    },
-  }, 'Прогреть кэш обложек');
-
-  const warmCancelButton = el('button', {
-    id: 'warm-cancel',
-    class: 'ghost danger',
-    onclick: async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        const data = await api('/api/web/covers/warm/cancel', { method: 'POST' });
-        updateWarmView(data);
-      } catch (error) {
-        toast(error.message, 'error');
-      } finally {
-        stopWarmPolling();
-      }
-    },
-  }, 'Остановить');
-  warmCancelButton.disabled = true;
 
   view.replaceChildren(
     el('h2', {}, 'Сервер'),
@@ -1583,19 +1476,7 @@ async function renderServer(view) {
           setView('server');
         },
       }, 'Очистить кэш обложек')),
-    el('h3', {}, 'Прогрев кэша обложек'),
-    el('p', { class: 'muted small' },
-      'Заранее готовит обложки для альбомов, у которых их ещё нет в кэше. ' +
-      'Останавливается сам, пока кто-то слушает музыку или смотрит обложку, и продолжает после.'),
-    warmBar,
-    warmInfo,
-    el('div', { class: 'row wrap' }, warmStartButton, warmCancelButton),
   );
-
-  updateWarmView(warmStatus);
-  if (warmStatus.state === 'running' || warmStatus.state === 'waiting') {
-    startWarmPolling();
-  }
 }
 
 /* ---------- Аккаунт ---------- */

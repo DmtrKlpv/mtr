@@ -42,56 +42,37 @@ def _percentile(values: list[float], share: float) -> float:
 
 async def bench_covers(ctx: AppContext, albums: int = 60) -> dict[str, object]:
     """Меряет холодное извлечение и чтение из кеша на выборке альбомов."""
-    pending = await ctx.covers.pending_album_ids(limit=albums)
+    # Выборка альбомов с треками. Прогрева больше нет, поэтому берём
+    # первые альбомы библиотеки: холодный прогон идёт по ним при первом чтении.
+    rows = await ctx.music_db.fetch_all(
+        "SELECT DISTINCT album_id FROM tracks "
+        "WHERE album_id IS NOT NULL AND missing = 0 ORDER BY album_id LIMIT ?",
+        (albums,),
+    )
+    pending = [int(row["album_id"]) for row in rows]
     if not pending:
-        # Всё уже прогрето: берём любые альбомы с треками, чтобы показать
-        # хотя бы стоимость чтения из кеша.
-        rows = await ctx.music_db.fetch_all(
-            "SELECT DISTINCT album_id FROM tracks "
-            "WHERE album_id IS NOT NULL AND missing = 0 LIMIT ?",
-            (albums,),
-        )
-        pending = [int(row["album_id"]) for row in rows]
-        if not pending:
-            raise SystemExit(
-                "в библиотеке нет альбомов с треками — сначала запустите скан"
-            )
-        print(
-            "ВНИМАНИЕ: у всех выбранных альбомов превью уже есть.\n"
-            "Замер холодного пути невозможен без очистки кеша:\n"
-            "  python -m app.cli covers --purge  (или Настройки → обложки)\n"
-            "Ниже — только стоимость чтения из кеша.\n"
-        )
-        cold: list[float] = []
-        present = False
-    else:
-        cold = []
-        present = True
-
+        raise SystemExit("в библиотеке нет альбомов с треками — сначала запустите скан")
+    cold: list[float] = []
     db_before = await ctx.covers.stats()
     sizes: list[int] = []
 
     # --- холодный путь: чтение файла, разбор тегов, уменьшение, запись ---
-    if present:
-        started = time.monotonic()
-        made = absent = failed = 0
-        for album_id in pending:
-            tick = time.monotonic()
-            try:
-                cover = await ctx.covers.for_album(album_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("замер: ошибка на альбоме %d", album_id)
-                failed += 1
-                continue
-            cold.append((time.monotonic() - tick) * 1000)
-            if cover is None:
-                absent += 1
-            else:
-                made += 1
-        total_cold = time.monotonic() - started
-    else:
-        made = absent = failed = 0
-        total_cold = 0.0
+    started = time.monotonic()
+    made = absent = failed = 0
+    for album_id in pending:
+        tick = time.monotonic()
+        try:
+            cover = await ctx.covers.for_album(album_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("замер: ошибка на альбоме %d", album_id)
+            failed += 1
+            continue
+        cold.append((time.monotonic() - tick) * 1000)
+        if cover is None:
+            absent += 1
+        else:
+            made += 1
+    total_cold = time.monotonic() - started
 
     # --- стоимость одного превью на диске ---
     if pending:

@@ -119,7 +119,7 @@ async def test_missing_cover_is_remembered(ctx, music_dir, monkeypatch):
 
 
 async def test_forget_missing_allows_new_lookup(ctx, music_dir, monkeypatch):
-    """После очистки кеша обложки ищутся заново."""
+    """После очистки маркеров обложки ищутся заново."""
     from tests.conftest import make_mp3, tag_mp3
 
     path = make_mp3(music_dir / "one" / "t.mp3", seconds=0.2)
@@ -143,7 +143,14 @@ async def test_forget_missing_allows_new_lookup(ctx, music_dir, monkeypatch):
     monkeypatch.setattr(covers_module, "extract_cover", counting)
     monkeypatch.setattr(covers_module, "extract_from_directory", counting)
 
+    # Память сброшена, но маркер «обложки нет» лежит в БД: он переживает
+    # перезапуск (см. _mark_absent). Поиск повторится только после очистки
+    # маркеров — полного скана или purge.
     ctx.covers.forget_missing()
     await ctx.covers.for_album(1)
+    assert calls == 0, "маркер в БД должен держать отказ до очистки"
 
-    assert calls > 0, "после сброса кеша поиск не повторился"
+    await ctx.covers.clear_absent_markers()
+    ctx.covers.forget_missing()
+    await ctx.covers.for_album(1)
+    assert calls > 0, "после очистки маркеров поиск должен повториться"

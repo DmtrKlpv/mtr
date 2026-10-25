@@ -1282,3 +1282,15 @@ label.inline {
 .check-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; }
 .remove-list { max-height: 280px; overflow: auto; margin: 6px 0; }
 .block { display: block; }
+
+/* ---------- Активность: скан и обложки ---------- */
+.activity {
+  margin: 12px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, rgba(127,127,127,.25));
+  border-radius: 10px;
+  background: rgba(127,127,127,.06);
+}
+.activity-title { font-weight: 600; margin-bottom: 8px; }
+.covers-progress { margin-top: 10px; }
+.covers-progress .progress-fill.running { transition: width .4s ease; }

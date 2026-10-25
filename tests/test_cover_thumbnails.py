@@ -10,7 +10,6 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 
-import pytest
 
 from app.covers.service import MAX_COVER_SIDE, make_thumbnail
 
@@ -109,41 +108,63 @@ async def test_store_writes_thumbnail_to_disk(ctx):
 
 
 # ----------------------------------------------------------------------
-# Прогрев
+# Ленивое извлечение: обложка берётся только при запросе, фонового прохода нет
 # ----------------------------------------------------------------------
-async def test_warm_prepares_missing_albums(ctx, music_dir: Path):
+async def test_scan_does_not_extract_covers(ctx, music_dir: Path, monkeypatch):
+    """Скан не читает картинки: только флаг has_cover из заголовков тегов."""
     from tests.conftest import make_mp3, tag_mp3
+    from app.repositories import covers as covers_module
+
+    calls = 0
+
+    def counting(path):
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(covers_module, "extract_cover", counting)
+    monkeypatch.setattr(covers_module, "extract_from_directory", counting)
 
     for a in range(3):
-        for t in range(2):
-            path = make_mp3(music_dir / f"al{a}" / f"t{t}.mp3", seconds=0.2)
-            tag_mp3(path, title=f"T{t}", artist=f"A{a}", album=f"Alb{a}")
+        path = make_mp3(music_dir / f"al{a}" / "t.mp3", seconds=0.2)
+        tag_mp3(path, title="T", artist=f"A{a}", album=f"Alb{a}")
     await ctx.scanner.scan(mode="full")
 
-    pending_before = await ctx.covers.pending_album_ids()
-    assert len(pending_before) == 3
-
-    result = await ctx.covers.warm()
-
-    assert result["total"] == 3
-    # Картинок в файлах нет — все три должны получить маркер «нет обложки».
-    assert result["absent"] == 3
-    assert await ctx.covers.pending_album_ids() == []
+    assert calls == 0
+    row = await ctx.music_db.fetch_one("SELECT COUNT(*) AS n FROM cover_cache")
+    assert int(row["n"]) == 0
 
 
-async def test_warm_is_idempotent(ctx, music_dir: Path):
-    """Повторный прогрев не должен ничего делать."""
+async def test_cover_is_extracted_on_first_request_only(ctx, music_dir: Path, monkeypatch):
+    """Первый запрос читает файл, повторный отдаётся из кеша без чтения."""
     from tests.conftest import make_mp3, tag_mp3
+    from app.repositories import covers as covers_module
+    from app.covers.service import CoverData
 
+    image = _image(1200)
     path = make_mp3(music_dir / "one" / "t.mp3", seconds=0.2)
-    tag_mp3(path, title="T", artist="A", album="Alb")
+    tag_mp3(path, title="T", artist="A", album="Alb", cover=image)
     await ctx.scanner.scan(mode="full")
+    album_id = int(await ctx.music_db.fetch_value("SELECT album_id FROM tracks LIMIT 1"))
 
-    first = await ctx.covers.warm()
-    second = await ctx.covers.warm()
+    calls = 0
 
-    assert first["total"] == 1
-    assert second["total"] == 0
+    def fake(path):
+        nonlocal calls
+        calls += 1
+        return CoverData(image, "image/jpeg", "embedded")
+
+    monkeypatch.setattr(covers_module, "extract_cover", fake)
+    monkeypatch.setattr(covers_module, "extract_from_directory", lambda p: None)
+
+    first = await ctx.covers.for_album(album_id)
+    after_first = calls
+    second = await ctx.covers.for_album(album_id)
+
+    assert first is not None and second is not None
+    # Первый запрос может обращаться к каталогу и к тегам (несколько вызовов).
+    # Важно другое: второй запрос к диску не ходит вовсе.
+    assert calls == after_first, "второй запрос должен идти из кеша"
 
 
 async def test_absent_marker_does_not_repeat_lookup(ctx, music_dir: Path, monkeypatch):
@@ -154,7 +175,8 @@ async def test_absent_marker_does_not_repeat_lookup(ctx, music_dir: Path, monkey
     path = make_mp3(music_dir / "one" / "t.mp3", seconds=0.2)
     tag_mp3(path, title="T", artist="A", album="Alb")
     await ctx.scanner.scan(mode="full")
-    await ctx.covers.warm()
+    album_id = int(await ctx.music_db.fetch_value("SELECT album_id FROM tracks LIMIT 1"))
+    await ctx.covers._mark_absent(f"al-{album_id}")
 
     calls = 0
 
@@ -168,7 +190,7 @@ async def test_absent_marker_does_not_repeat_lookup(ctx, music_dir: Path, monkey
 
     # Сбрасываем только память, БД остаётся — как после рестарта контейнера.
     ctx.covers.forget_missing()
-    assert await ctx.covers.for_album(1) is None
+    assert await ctx.covers.for_album(album_id) is None
     assert calls == 0, "маркер проигнорирован, обложка искалась заново"
 
 

@@ -59,12 +59,13 @@ async function renderScan(view) {
       button.disabled = true;
       try {
         await api(`/api/web/scan?mode=${mode}`, { method: 'POST' });
-        toast('Сканирование завершено', 'ok');
+        toast('Сканирование запущено', 'ok');
+        // Скан стартует асинхронно: опрос включаем сразу, а не после перерисовки.
+        startScanPolling(view);
       } catch (error) {
         toast(error.message, 'error');
       } finally {
         button.disabled = false;
-        renderScan(view);
       }
     },
   }, label);
@@ -101,6 +102,8 @@ async function renderScan(view) {
       'Полный заново разбирает теги у всех файлов и помечает отсутствующие.'),
     bar,
     info,
+    el('h3', {}, 'Обложки'),
+    coversProgress(),
     liveErrors,
     actions,
     el('h3', {}, 'История'),
@@ -109,7 +112,8 @@ async function renderScan(view) {
   );
 
   // Если скан уже идёт (запущен из другой вкладки) — подхватываем прогресс.
-  if (status.current && status.current.status === 'running') {
+  updateCoversView(status.covers);
+  if (scanIsBusy(status)) {
     updateScanView(status.current);
     startScanPolling(view);
   } else {
@@ -135,14 +139,70 @@ function startScanPolling(view) {
       const data = await api('/api/web/scan/status');
       if (state.view !== 'scan') { stopScanPolling(); return; }
       updateScanView(data.current);
-      if (data.current.status !== 'running') {
+      updateCoversView(data.covers);
+      if (!scanIsBusy(data)) {
         stopScanPolling();
-        renderScan(view);
+        renderScan(view);   // финальная перерисовка: история и итоги
       }
     } catch (error) {
-      stopScanPolling();
+      // Сеть на миг пропала — не бросаем опрос, пробуем на следующем тике.
+      if (error && error.message === 'unauthorized') stopScanPolling();
     }
   }, 1000);
+}
+
+// Занят ли сервер: идёт скан или фаза обложек после него.
+function scanIsBusy(data) {
+  if (!data) return false;
+  const scanning = Boolean(data.current && data.current.status === 'running');
+  const covering = Boolean(data.covers && data.covers.state === 'running');
+  return scanning || covering;
+}
+
+// Полоса прогресса обложек. Ids общие для раздела и главной: они никогда
+// не показываются одновременно.
+function coversProgress() {
+  return el('div', { class: 'covers-progress' },
+    el('div', { class: 'progress' }, el('div', { class: 'progress-fill', id: 'covers-fill' })),
+    el('div', { class: 'scan-info', id: 'covers-info' }),
+  );
+}
+
+function updateCoversView(covers) {
+  const fillNode = document.querySelector('#covers-fill');
+  const infoNode = document.querySelector('#covers-info');
+  if (!fillNode || !infoNode || !covers) return;
+
+  const labels = {
+    idle: 'Обложки: ждут скана',
+    running: 'Обложки: извлечение',
+    done: 'Обложки: все альбомы обработаны',
+    cancelled: 'Обложки: остановлено',
+    error: 'Обложки: ошибка',
+  };
+  const percent = covers.percent ?? 0;
+  fillNode.style.width = `${covers.state === 'done' ? 100 : percent}%`;
+  fillNode.classList.toggle('running', covers.state === 'running');
+  fillNode.classList.toggle('failed', covers.state === 'error');
+
+  const parts = [labels[covers.state] || covers.state];
+  if (covers.total) parts.push(`${covers.done} из ${covers.total}`);
+  if (covers.made) parts.push(`сделано ${covers.made}`);
+  if (covers.absent) parts.push(`без картинки ${covers.absent}`);
+  if (covers.failed) parts.push(`ошибок ${covers.failed}`);
+  if (covers.state === 'running' && covers.current_album_sec != null && covers.current_album_sec >= 5) {
+    // Альбом читается дольше 5 с — показываем, чтобы было видно, что фаза не встала.
+    parts.push(`альбом ${covers.current_album} · ${Math.round(covers.current_album_sec)} с`);
+  }
+  if (covers.state === 'running' && covers.eta_sec != null) {
+    parts.push(`осталось ~${Math.max(1, Math.round(covers.eta_sec / 60))} мин`);
+  }
+  if (covers.last_error) parts.push(covers.last_error);
+  fill(infoNode, el('span', {}, parts.join(' · ')));
+
+  // Блок целиком виден только когда фаза шла или идёт.
+  const block = fillNode.closest('.covers-progress');
+  if (block) block.classList.toggle('hidden', covers.state === 'idle' && !covers.total);
 }
 
 function updateScanView(current) {
@@ -197,12 +257,11 @@ function updateScanView(current) {
   }
 }
 
-/* ---------- Подробный статус скана на главной ----------
+/* ---------- Активность на главной ----------
 
-   Пока идёт первый (или любой ручной) скан, главная показывает прогресс,
-   а не бесконечное «Загрузка…»: пока библиотека не проиндексирована,
-   основному интерфейсу просто нечего рисовать. Как только проход
-   завершается, панель уступает место обычной главной. */
+   Библиотека видна сразу: сверху показывается панель скана и фазы обложек,
+   а список альбомов обновляется на ходу, пока данные меняются. Раньше главная
+   целиком заменялась панелью скана до конца прохода. */
 
 let homeScanTimer = null;
 
@@ -213,111 +272,85 @@ function stopHomeScan() {
   }
 }
 
-// Возвращает true, если главную сейчас занимает панель статуса.
-async function scanGate(view) {
-  stopHomeScan();
-  let status;
-  try {
-    status = await api('/api/web/scan/status');
-  } catch (error) {
-    return false;   // нет доступа/сети — пусть главная попробует сама
-  }
-  const current = status && status.current;
-  if (!current || current.status !== 'running') return false;
-
-  const box = el('div', { class: 'scan-status', id: 'scan-status' });
-  drawScanStatus(box, current, status);
-
-  fill(view,
-    el('h2', {}, 'Идёт сканирование библиотеки'),
-    el('p', { class: 'muted small' },
-      'Главная откроется автоматически, когда проход закончится. ' +
-      'Страницу можно не закрывать.'),
-    box,
-    el('div', { class: 'row' }, el('button', {
-      class: 'ghost', onclick: () => setView('scan'),
-    }, 'Подробнее о сканере')),
+// Панель в начале главной. Видимость внутренних блоков решает renderHomeActivity.
+function homeActivityBox() {
+  return el('div', { id: 'home-activity', class: 'activity hidden' },
+    el('div', { class: 'activity-title' }, 'Идёт обработка библиотеки'),
+    el('div', { id: 'home-scan-block' },
+      el('div', { class: 'progress' }, el('div', { class: 'progress-fill', id: 'scan-fill' })),
+      el('div', { class: 'scan-info', id: 'scan-info' }),
+    ),
+    el('div', { id: 'home-covers-block' }, coversProgress()),
   );
+}
 
+function renderHomeActivity(data) {
+  const box = document.querySelector('#home-activity');
+  if (!box) return;
+  const scanning = Boolean(data.current && data.current.status === 'running');
+  const covering = Boolean(data.covers && data.covers.state === 'running');
+  box.classList.toggle('hidden', !(scanning || covering));
+  document.querySelector('#home-scan-block')?.classList.toggle('hidden', !scanning);
+  document.querySelector('#home-covers-block')?.classList.toggle('hidden', !covering);
+  if (scanning) updateScanView(data.current);
+  if (covering) updateCoversView(data.covers);
+}
+
+// Перерисовывает список альбомов/исполнителей/плейлистов без сброса всей главной.
+async function refreshLibraryBody() {
+  const body = document.querySelector('#library-body');
+  if (!body) return;
+  try {
+    if (state.libraryView === 'artists') await renderArtistsInto(body);
+    else if (state.libraryView === 'playlists') await renderPlaylistsInto(body);
+    else await renderAlbumsInto(body);
+  } catch (error) {
+    // Временная ошибка сети не должна ломать главную: следующий тик повторит.
+  }
+  loadStats(document.querySelector('.cards')).catch(() => {});
+}
+
+// Вызывается из renderLibrary. Показывает панель, если сервер занят, и
+// опрашивает статус, пока есть работа.
+async function mountHomeActivity() {
+  stopHomeScan();
+  let data;
+  try {
+    data = await api('/api/web/scan/status');
+  } catch (error) {
+    return;
+  }
+  renderHomeActivity(data);
+  if (!scanIsBusy(data)) return;
+
+  let lastSignature = '';
+  let lastRefresh = 0;
   homeScanTimer = setInterval(async () => {
     if (state.view !== 'library') { stopHomeScan(); return; }
-    let data;
+    let current;
     try {
-      data = await api('/api/web/scan/status');
+      current = await api('/api/web/scan/status');
     } catch (error) {
       stopHomeScan();
       return;
     }
-    if (!data.current || data.current.status !== 'running') {
-      stopHomeScan();
-      setView('library');   // проход закончился — показываем основной интерфейс
-      return;
+    renderHomeActivity(current);
+    const busy = scanIsBusy(current);
+    // Обновляем список, когда что-то реально изменилось, но не чаще раза в 3 с.
+    const signature = [
+      current.current?.processed, current.current?.added, current.covers?.done,
+    ].join('|');
+    const now = Date.now();
+    if (signature !== lastSignature && now - lastRefresh > 3000) {
+      lastSignature = signature;
+      lastRefresh = now;
+      refreshLibraryBody();
     }
-    const node = document.querySelector('#scan-status');
-    if (!node) { stopHomeScan(); return; }
-    drawScanStatus(node, data.current, data);
+    if (!busy) {
+      stopHomeScan();
+      refreshLibraryBody();   // финальный кадр: всё, что успело записаться
+    }
   }, 1000);
-
-  return true;
-}
-
-function drawScanStatus(node, current, status) {
-  const percent = current.percent ?? 0;
-  const stageLabels = {
-    walk: 'обход каталога и подсчёт файлов',
-    walk_done: 'файлы найдены, начинается разбор',
-    parsing: 'разбор тегов',
-    done: 'завершено',
-  };
-  const modeLabels = { full: 'полный', incremental: 'инкрементальный', watch: 'по изменениям' };
-  const started = current.started_at
-    ? String(current.started_at).replace('T', ' ').slice(0, 19)
-    : '—';
-
-  const rows = [
-    ['Режим', modeLabels[current.mode] || current.mode || '—'],
-    ['Этап', stageLabels[current.stage] || current.stage || 'подготовка'],
-    ['Начало', started],
-    ['Найдено файлов', String(current.seen ?? 0)],
-    ['Нужно разобрать', String(current.to_parse ?? 0)],
-    ['Разобрано', `${current.processed ?? 0} из ${current.to_parse ?? 0}`],
-    ['Новых', String(current.added ?? 0)],
-    ['Обновлено', String(current.updated ?? 0)],
-    ['Без изменений', String(current.unchanged ?? 0)],
-    ['Удалено', String(current.removed ?? 0)],
-    ['Ошибок', String(current.failed ?? 0)],
-  ];
-
-  const watcher = status && status.watcher;
-  const errors = current.recent_errors || [];
-  // Та же таблица, что и в истории: «файл / причина».
-  const errorBlock = errors.length
-    ? el('div', {},
-        el('h3', {}, `Ошибки (${current.failed || errors.length})`),
-        scanErrorTable(errors, current.failed || errors.length),
-      )
-    : null;
-
-  fill(node,
-    el('div', { class: 'progress' },
-      el('div', {
-        class: 'progress-fill running',
-        style: `width:${percent}%`,
-      }),
-    ),
-    el('p', { class: 'scan-info' },
-      `${percent}% · ${stageLabels[current.stage] || 'работа'} · разобрано ` +
-      `${current.processed ?? 0} из ${current.to_parse ?? 0}`),
-    el('div', { class: 'kv' }, ...rows.flatMap(([key, value]) => [
-      el('span', { class: 'muted' }, key),
-      el('span', { class: 'mono break' }, value),
-    ])),
-    watcher && watcher.state
-      ? el('p', { class: 'muted small' }, `Наблюдатель: ${watcher.state}, в очереди ${watcher.pending ?? 0}`)
-      : null,
-    current.error ? el('p', { class: 'error small' }, current.error) : null,
-    errorBlock,
-  );
 }
 
 /* ---------- Импорт плейлистов ---------- */

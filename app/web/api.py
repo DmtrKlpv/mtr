@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import logging
@@ -338,29 +339,44 @@ async def record_play_event(
     return _ok({"track_id": track_id})
 
 
+# Фоновые задачи сканирования: держим ссылку, иначе asyncio может собрать её раньше.
+_SCAN_TASKS: set[asyncio.Task] = set()
+
+
+async def _run_scan(ctx: AppContext, mode: str) -> None:
+    """Фоновый проход. Результат виден через /scan/status, а не в HTTP-ответе."""
+    state = ctx.scan_state
+    try:
+        await ctx.scanner.scan(mode=mode)
+        await state.finish(status="completed")
+    except Exception as exc:  # noqa: BLE001 - причину показываем в UI
+        logger.exception("скан из веб-интерфейса не удался")
+        await state.fail(str(exc))
+
+
 @router.post("/scan")
 async def trigger_scan(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(admin_csrf),
     mode: str = Query("incremental"),
 ) -> JSONResponse:
-    """Запускает индексацию. Синхронно: UI ждёт и показывает итог."""
+    """Запускает скан в фоне и сразу отвечает 202.
+
+    Раньше ответ ждал конца скана, и интерфейс не видел прогресса, пока
+    не обновят страницу. Теперь клиент опрашивает GET /scan/status.
+    """
     if mode not in ("full", "incremental"):
         raise HTTPException(
             status_code=400, detail="mode must be full or incremental"
         )
     state = ctx.scan_state
     if not await state.begin(mode):
-        # Уже идёт: не запускаем второй проход, сообщаем текущее состояние.
+        # Уже идёт: не запускаем второй проход, отдаём текущее состояние.
         return _fail("Сканирование уже выполняется", 409)
-    try:
-        result = await ctx.scanner.scan(mode=mode)
-        await state.finish(status="completed")
-    except Exception as exc:  # noqa: BLE001 - причину показываем в UI
-        logger.exception("скан из веб-интерфейса не удался")
-        await state.fail(str(exc))
-        return _fail(f"Скан не удался: {exc}", 500)
-    return _ok(result.as_dict())
+    task = asyncio.create_task(_run_scan(ctx, mode), name=f"scan-{mode}")
+    _SCAN_TASKS.add(task)
+    task.add_done_callback(_SCAN_TASKS.discard)
+    return _ok({"started": True, "mode": mode, **state.as_dict()}, status_code=202)
 
 
 @router.get("/scan/status")
@@ -373,7 +389,12 @@ async def scan_status(
     Плюс последний завершённый проход из БД: после перезапуска контейнера
     состояние в памяти пустое, а история должна остаться.
     """
-    payload = {"current": ctx.scan_state.as_dict(), "watcher": None, "last_run": None}
+    payload = {
+        "current": ctx.scan_state.as_dict(),
+        "covers": ctx.cover_pass.as_dict(),
+        "watcher": None,
+        "last_run": None,
+    }
     if ctx.watcher is not None:
         payload["watcher"] = {
             "state": ctx.watcher.state,
@@ -744,55 +765,6 @@ async def purge_covers(
     """
     removed = await ctx.covers.purge_all()
     return _ok({"files_removed": removed})
-
-
-@router.post("/covers/warm")
-async def warm_covers(
-    request: Request,
-    ctx: AppContext = Depends(get_ctx),
-    session: SessionRecord = Depends(admin_csrf),
-) -> JSONResponse:
-    """Запускает фоновый прогрев обложек и сразу возвращает статус.
-
-    Прогрев не держит HTTP-запрос: он идёт отдельной задачей, уступает
-    открытию сетки и стримам. Следить — GET /api/web/covers/warm, остановить —
-    POST /api/web/covers/warm/cancel. Повторный запуск во время работы
-    ничего не ломает: вернётся текущий статус.
-    """
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = {}
-    raw_limit = body.get("limit") if isinstance(body, dict) else None
-    try:
-        limit = int(raw_limit) if raw_limit else None
-    except (TypeError, ValueError):
-        return _fail("limit должен быть числом")
-    warmer = request.app.state.warmer
-    started = await warmer.start(limit)
-    payload = warmer.status.as_dict()
-    payload["started"] = started
-    return _ok(payload)
-
-
-@router.get("/covers/warm")
-async def warm_status(
-    request: Request,
-    session: SessionRecord = Depends(require_admin),
-) -> JSONResponse:
-    """Состояние прогрева: сколько сделано, сколько осталось, оценка времени."""
-    return _ok(request.app.state.warmer.status.as_dict())
-
-
-@router.post("/covers/warm/cancel")
-async def warm_cancel(
-    request: Request,
-    session: SessionRecord = Depends(admin_csrf),
-) -> JSONResponse:
-    """Останавливает прогрев. Готовые превью остаются, продолжить можно позже."""
-    warmer = request.app.state.warmer
-    was_running = await warmer.cancel()
-    return _ok({"cancelled": was_running, **warmer.status.as_dict()})
 
 
 @router.post("/account/password")

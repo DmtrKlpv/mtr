@@ -16,6 +16,7 @@ from app.db.database import Database
 from app.db.migrations import init_databases
 from app.audio.ffmpeg import TranscodeLimiter
 from app.audio.service import StreamService
+from app.covers.prefetch import CoverPass
 from app.covers.service import CoverResolver
 from app.repositories.covers import CoverRepository
 from app.repositories.library import LibraryRepository
@@ -50,6 +51,7 @@ class AppContext:
     stream_service: StreamService
     scanner: Scanner
     scan_state: ScanState
+    cover_pass: CoverPass
     watcher: LibraryWatcher | None = None
 
     @classmethod
@@ -96,11 +98,16 @@ class AppContext:
         limiter = TranscodeLimiter(settings.max_transcodes)
         stream_service = StreamService(tracks_repo, limiter)
         scan_state = ScanState()
+        cover_pass = CoverPass(covers_repo)
         scanner = Scanner(
             tracks_repo,
             settings.music_dir,
             on_progress=scan_state.update,
             parse_concurrency=settings.scan_concurrency,
+            # Новый скан отменяет фазу обложек: данные о треках меняются на ходу.
+            on_scan_start=lambda mode: cover_pass.cancel_nowait(),
+            # Фаза стартует только после успешного скана, а не при загрузке.
+            on_scan_done=lambda mode: cover_pass.start(mode),
         )
 
         watcher = LibraryWatcher(
@@ -132,11 +139,13 @@ class AppContext:
             stream_service=stream_service,
             scanner=scanner,
             scan_state=scan_state,
+            cover_pass=cover_pass,
             watcher=watcher,
         )
 
     async def close(self) -> None:
-        """Закрывает обе базы. Безопасно вызывать повторно."""
+        """Останавливает фоновые задачи и закрывает обе базы."""
+        await self.cover_pass.stop()
         await self.music_db.close()
         await self.users_db.close()
 

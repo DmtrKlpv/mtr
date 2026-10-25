@@ -69,9 +69,6 @@ class CoverRepository:
         # Ограничитель именно для извлечения: чтение с диска не должно
         # занимать event loop и не должно идти сотнями потоков.
         self._semaphore = asyncio.Semaphore(COVER_EXTRACT_CONCURRENCY)
-        # Сколько запросов обложек от пользователя (сетка, плеер) выполняется
-        # прямо сейчас. Фоновый прогрев уступает, пока этот счётчик не ноль.
-        self._foreground = 0
         # Отрицательный кеш: ключ -> True. Храним в памяти процесса.
         self._missing: OrderedDict[str, None] = OrderedDict()
 
@@ -155,17 +152,9 @@ class CoverRepository:
     # ------------------------------------------------------------------
     # Разрешение для альбома
     # ------------------------------------------------------------------
-    async def for_album(
-        self, album_id: int, *, background: bool = False
-    ) -> CoverData | None:
-        """Обёртка со счётчиком переднего плана; логика в `_for_album`."""
-        if background:
-            return await self._for_album(album_id)
-        self._foreground += 1
-        try:
-            return await self._for_album(album_id)
-        finally:
-            self._foreground -= 1
+    async def for_album(self, album_id: int) -> CoverData | None:
+        """Обложка альбома: кэш, затем файл в каталоге, затем теги."""
+        return await self._for_album(album_id)
 
     async def _for_album(self, album_id: int) -> CoverData | None:
         """Обложка альбома: кеш, затем файл в каталоге, затем встроенные.
@@ -211,22 +200,54 @@ class CoverRepository:
 
         if cover is None:
             self._remember_missing(key)
+            await self.mark_absent(key)
             return None
         await self.store(key, cover)
         logger.debug("обложка альбома %d (%s)", album_id, cover.source)
         return cover
 
-    async def for_track(
-        self, track_id: int, *, background: bool = False
-    ) -> CoverData | None:
-        """Обёртка со счётчиком переднего плана; логика в `_for_track`."""
-        if background:
-            return await self._for_track(track_id)
-        self._foreground += 1
-        try:
-            return await self._for_track(track_id)
-        finally:
-            self._foreground -= 1
+    async def pending_album_ids(self, limit: int | None = None) -> list[int]:
+        """Альбомы с треками, у которых ещё нет записи в кеше (ни файла, ни маркера).
+
+        Маркер «обложки нет» сохраняется в БД, поэтому альбом без картинки
+        не проверяется повторно после каждого скана.
+        """
+        sql = (
+            "SELECT a.id AS id FROM albums a "
+            "WHERE EXISTS (SELECT 1 FROM tracks t "
+            "              WHERE t.album_id = a.id AND t.missing = 0) "
+            "  AND NOT EXISTS (SELECT 1 FROM cover_cache c "
+            "                  WHERE c.key = 'al-' || a.id) "
+            "ORDER BY a.id"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (max(1, int(limit)),)
+        rows = await self._db.fetch_all(sql, params)
+        return [int(row["id"]) for row in rows]
+
+    async def mark_absent(self, key: str) -> None:
+        """Пишет в БД маркер «картинки нет» (file_path пустой, см. get_cached)."""
+        await self._db.execute(
+            "INSERT INTO cover_cache (key, file_path, mime_type, size_bytes, source, created_at) "
+            "VALUES (?, '', '', 0, 'absent', ?) "
+            "ON CONFLICT(key) DO UPDATE SET file_path = '', size_bytes = 0, source = 'absent'",
+            (key, utcnow_iso()),
+        )
+
+    async def clear_absent_markers(self) -> int:
+        """Снимает маркеры «картинки нет»: после полного скана тегов стоит перепроверить."""
+        count = int(await self._db.fetch_value(
+            "SELECT COUNT(*) FROM cover_cache WHERE file_path = ''", default=0,
+        ) or 0)
+        await self._db.execute("DELETE FROM cover_cache WHERE file_path = ''")
+        self.forget_missing()
+        return count
+
+    async def for_track(self, track_id: int) -> CoverData | None:
+        """Обложка трека: кэш, затем теги самого файла, затем обложка альбома."""
+        return await self._for_track(track_id)
 
     async def _for_track(self, track_id: int) -> CoverData | None:
         """Обложка конкретного трека (для `tr-<id>`)."""
@@ -313,61 +334,6 @@ class CoverRepository:
         await self._db.execute("DELETE FROM cover_cache")
         self.forget_missing()
         return removed
-
-    @property
-    def foreground_busy(self) -> bool:
-        """Есть ли сейчас запросы обложек от пользователя."""
-        return self._foreground > 0
-
-    async def pending_album_ids(self, limit: int | None = None) -> list[int]:
-        """Альбомы, для которых обложка ещё не решена.
-
-        «Решена» = есть либо файл превью, либо маркер «нет картинки». Уже
-        просмотренные пользователем альбомы сюда не попадают, поэтому прогрев
-        после первого прохода почти ничего не делает.
-        """
-        sql = (
-            "SELECT a.id AS id FROM albums a "
-            "WHERE EXISTS (SELECT 1 FROM tracks t "
-            "              WHERE t.album_id = a.id AND t.missing = 0) "
-            "  AND NOT EXISTS (SELECT 1 FROM cover_cache c "
-            "                  WHERE c.key = 'al-' || a.id) "
-            "ORDER BY a.id"
-        )
-        params: tuple[object, ...] = ()
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (max(1, int(limit)),)
-        rows = await self._db.fetch_all(sql, params)
-        return [int(row["id"]) for row in rows]
-
-    async def warm(self, limit: int | None = None) -> dict[str, int]:
-        """Готовит превью для альбомов, у которых их ещё нет.
-
-        Возвращает счётчики: сколько сделано, сколько без картинки, сколько
-        сломалось. Идёт последовательно (семафор в for_album ограничивает
-        извлечение), чтобы не отбирать диск у воспроизведения.
-        """
-        ids = await self.pending_album_ids(limit)
-        made = absent = failed = 0
-        for album_id in ids:
-            key = f"al-{album_id}"
-            try:
-                cover = await self.for_album(album_id, background=True)
-            except Exception:  # noqa: BLE001 - один альбом не должен рвать прогрев
-                logger.exception("прогрев: ошибка на альбоме %d", album_id)
-                failed += 1
-                continue
-            if cover is None:
-                await self._mark_absent(key)
-                absent += 1
-            else:
-                made += 1
-        logger.info(
-            "прогрев обложек: готово %d, без картинки %d, ошибок %d",
-            made, absent, failed,
-        )
-        return {"total": len(ids), "made": made, "absent": absent, "failed": failed}
 
     async def stats(self) -> dict[str, int]:
         """Сколько обложек в кэше и сколько занимают."""

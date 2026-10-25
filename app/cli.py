@@ -17,7 +17,6 @@ import getpass
 import json
 import logging
 import sys
-import time
 
 from app.bootstrap import AppContext, ensure_bootstrap_admin
 from app.config import Settings
@@ -170,56 +169,19 @@ async def _cmd_purge_missing(args: argparse.Namespace) -> int:
 
 
 async def _cmd_covers(args: argparse.Namespace) -> int:
-    """Готовит превью обложек заранее.
+    """Очистка кеша обложек. Фонового прогрева больше нет.
 
-    Извлечение картинки — самое дорогое место при показе сетки: разбор тегов
-    и чтение файла на каждую карточку. Здесь мы делаем это один раз, пачкой,
-    чтобы интерфейс потом отдавал готовые файлы.
+    Обложка извлекается при первом запросе getCoverArt и кладётся в кеш.
+    Поэтому единственная команда здесь — сброс кеша.
     """
+    if not args.purge:
+        print("фонового прогрева обложек нет: обложка извлекается при запросе.")
+        print("для сброса кеша: python -m app.cli covers --purge")
+        return 0
     ctx = await AppContext.create(Settings.from_env())
     try:
-        if args.purge:
-            removed = await ctx.covers.purge_all()
-            print(f"удалено записей кеша: {removed}")
-            return 0
-
-        limit = None if not args.limit else max(1, int(args.limit))
-
-        # Замер встроен в саму команду: на armv7 через 9 секунд уже хочется
-        # знать «сколько на альбом» и «когда закончится», а не считать в уме.
-        started = time.monotonic()
-        result = await ctx.covers.warm(limit)
-        elapsed = time.monotonic() - started
-
-        print(
-            f"обработано {result['total']}: готово {result['made']}, "
-            f"без картинки {result['absent']}, ошибок {result['failed']}"
-        )
-        if result["total"] == 0:
-            print("все обложки уже готовы")
-            return 0
-
-        per_album = elapsed / max(1, result["total"])
-        print(f"прошло {elapsed:.1f} с ({per_album * 1000:.0f} мс на альбом)")
-
-        # Сколько осталось и сколько это займёт при той же скорости.
-        pending = await ctx.covers.pending_album_ids()
-        if pending:
-            eta = len(pending) * per_album
-            print(
-                f"осталось {len(pending)} альбомов — при той же скорости "
-                f"это {_human_duration(eta)}"
-            )
-            print("доготовить всё: python -m app.cli covers")
-        else:
-            print("недоделанных нет — кеш полон")
-
-        stats = await ctx.covers.stats()
-        if stats.get("count"):
-            print(
-                f"в кеше {stats['count']} обложек, "
-                f"{_human_size(stats.get('total_bytes', 0))} на диске"
-            )
+        removed = await ctx.covers.purge_all()
+        print(f"удалено записей кеша: {removed}")
     finally:
         await ctx.close()
     return 0
@@ -313,11 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_purge.set_defaults(func=_cmd_purge_missing)
 
     p_covers = sub.add_parser(
-        "covers", help="подготовить превью обложек (600px) заранее"
-    )
-    p_covers.add_argument(
-        "--limit", type=int, default=0,
-        help="сколько альбомов обработать за раз (0 — все)",
+        "covers", help="сбросить кеш обложек"
     )
     p_covers.add_argument(
         "--purge", action="store_true",

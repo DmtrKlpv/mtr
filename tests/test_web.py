@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import AsyncIterator
 
 import httpx
@@ -366,8 +368,15 @@ async def test_scan_endpoint(web):
     response = await client.post(
         "/api/web/scan?mode=full", headers={"X-CSRF-Token": csrf}
     )
-    assert response.status_code == 200
-    assert response.json()["data"]["seen"] == 3
+    # Скан асинхронный: POST отвечает 202 сразу, результат — через /scan/status.
+    assert response.status_code == 202
+    for _ in range(200):
+        status = (await client.get("/api/web/scan/status")).json()["data"]
+        if status["current"]["status"] != "running":
+            break
+        await asyncio.sleep(0.05)
+    assert status["current"]["status"] == "completed"
+    assert status["current"]["seen"] == 3
 
 
 # ----------------------------------------------------------------------
@@ -507,8 +516,16 @@ async def test_cover_art_works_with_session_cookie(web):
     client, app = web
     await login_admin(client)
     # Кладём обложку рядом с треком и сбрасываем кэш альбомов.
-    music_dir = app.state.ctx.settings.music_dir
+    ctx = app.state.ctx
+    music_dir = ctx.settings.music_dir
+    # Фоновая фаза обложек после скана могла уже записать «картинки нет».
+    # Дождаться её и снять маркеры, как при появлении обложки в тегах.
+    for _ in range(500):
+        if not ctx.cover_pass.running:
+            break
+        await asyncio.sleep(0.02)
     (music_dir / "cover.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 64)
+    await ctx.covers.clear_absent_markers()
 
     albums = (await client.get("/api/web/albums")).json()["data"]["items"]
     response = await client.get(f"/rest/getCoverArt?id=al-{albums[0]['id']}")

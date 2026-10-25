@@ -55,12 +55,44 @@ assert out is not None, 'make_thumbnail вернул None — ресайз не 
 assert Image.open(io.BytesIO(out[0])).size == (600, 600), 'не 600x600'
 "
 
+# WebP: без поддержки в Pillow обложки WebP отдаются как есть (не ошибка).
+# Проверка честная — реальное декодирование, а не флаг features.check.
+webp=$(python -c "from app.covers.service import webp_support; print('да' if webp_support() else 'нет')" 2>/dev/null || echo "нет")
+if [ "$webp" = "да" ]; then
+    printf '  OK    WebP-декодер Pillow работает\n'
+    ok=$((ok + 1))
+else
+    printf '  ВНИМАНИЕ  WebP-декодер Pillow не работает: обложки WebP не уменьшаются (на armv7 это известно)\n'
+fi
+
 # ffmpeg нужен аудиоядру, а не обложкам, но его отсутствие ломает стриминг.
 check "ffmpeg доступен" sh -c "command -v ffmpeg"
-check "каталог музыки смонтирован" sh -c "test -d \${MUSIC_DIR:-/music}"
-check "каталог состояния смонтирован" sh -c "test -d \${DATA_DIR:-/data}"
+
+# Монтирования существуют только внутри контейнера: /music и /data
+# привязываются Docker'ом из docker-compose.yml. На хосте или в песочнице
+# этих путей нет по определению, поэтому там проверка НЕ считается провалом,
+# а честно помечается как пропущенная. Внутри контейнера отсутствие — ошибка.
+if [ -f /.dockerenv ]; then
+    check "каталог музыки смонтирован" sh -c "test -d \${MUSIC_DIR:-/music}"
+    check "каталог состояния смонтирован" sh -c "test -d \${DATA_DIR:-/data}"
+else
+    skipped=0
+    for path_var in MUSIC_DIR DATA_DIR; do
+        eval "value=\${$path_var:-}"
+        if [ -n "$value" ] && [ -d "$value" ]; then
+            printf '  OK    %s задан и существует: %s\n' "$path_var" "$value"
+            ok=$((ok + 1))
+        else
+            printf '  ПРОПУЩЕНО  %s: вне контейнера монтирования не проверяются\n' "$path_var"
+            skipped=$((skipped + 1))
+        fi
+    done
+fi
 
 echo
+if [ -n "${skipped:-}" ] && [ "$skipped" -gt 0 ]; then
+    echo "Пропущено проверок вне контейнера: $skipped (запустите внутри mtr-app, чтобы проверить монтирования)"
+fi
 if [ "$fail" -eq 0 ]; then
     echo "Всё на месте ($ok проверок)."
     exit 0
