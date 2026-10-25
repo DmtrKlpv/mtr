@@ -74,7 +74,9 @@ async def test_root_favicon_served(client):
 
 
 async def test_login_page_declares_icons(client):
-    html = (await client.get("/login")).text
+    # На пустой базе /login уводит на /setup — проверяем ту страницу, которая
+    # реально отдаётся. Иконки общие: обе страницы собираются из HEAD_COMMON.
+    html = (await client.get("/setup")).text
     assert 'rel="icon"' in html
     assert "apple-touch-icon" in html
     assert "manifest.webmanifest" in html
@@ -82,6 +84,6 @@ async def test_login_page_declares_icons(client):
 
 async def test_icons_not_blocked_by_csp(client):
     """Иконки с 'self' не должны попадать под запрет CSP."""
-    response = await client.get("/login")
+    response = await client.get("/setup")
     csp = response.headers["content-security-policy"]
     assert "img-src 'self'" in csp

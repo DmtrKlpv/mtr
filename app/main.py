@@ -23,15 +23,15 @@ from app import __version__
 from app.bootstrap import (
     AppContext,
     apply_runtime_settings,
-    ensure_bootstrap_admin,
 )
 from app.api.covers_ws import router as covers_router
 from app.web.api import router as web_api_router
+from app.web.folder_api import router as folder_api_router
 from app.web.ui import router as web_ui_router
 from app.api.stream import router as stream_router
 from app.subsonic.auth import AuthContext, AuthThrottle
 from app.subsonic.deps import require_auth_binary as _require_auth_http
-from app.subsonic.errors import ErrorCode, SubsonicError
+from app.subsonic.errors import SubsonicError
 from app.subsonic.response import error_response
 from app.subsonic.router import router as subsonic_router
 from app.config import Settings
@@ -45,7 +45,11 @@ logger = logging.getLogger("app")
 
 
 def _configure_logging() -> None:
-    """Единый формат логов для uvicorn и прикладного кода."""
+    """Единый формат логов для uvicorn и прикладного кода.
+
+    Уровень здесь — только стартовый: настоящий берётся из базы и применяется
+    чуть ниже, когда контекст уже создан.
+    """
     level = os.environ.get("MTR_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
@@ -61,30 +65,6 @@ def _configure_logging() -> None:
     install_log_redaction()
 
 
-async def _bootstrap_admin_if_requested(ctx: AppContext) -> None:
-    """Создаёт администратора из env, если база пользователей пуста.
-
-    Нужно для первого запуска в Docker: без учётки в панель не войти, а
-    лезть внутрь контейнера ради CLI хочется не всегда. Если переменные
-    не заданы — молча ничего не делаем.
-    """
-    username = os.environ.get("MTR_ADMIN_USER")
-    password = os.environ.get("MTR_ADMIN_PASSWORD")
-    if not username or not password:
-        return
-    try:
-        created = await ensure_bootstrap_admin(
-            ctx.users, username=username, password=password
-        )
-        if created:
-            logger.warning(
-                "создан стартовый администратор %r по переменным окружения — "
-                "смените пароль после первого входа", username,
-            )
-    except Exception:  # noqa: BLE001 - не роняем сервер из-за bootstrap
-        logger.exception("не удалось создать стартового администратора")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Поднимает и корректно закрывает контекст приложения."""
@@ -98,6 +78,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ctx = ctx
     app.state.auth_throttle = AuthThrottle()
     app.state.library_repo = ctx.library
+    # Фоновый прогрев обложек: одна задача на процесс, запускается через API.
+    from app.covers.warmer import CoverWarmer
+    app.state.warmer = CoverWarmer(ctx.covers, ctx.stream_service.limiter)
 
     # Предупреждаем громко: если volume не проброшен, библиотека будет пустой.
     if not settings.music_dir.exists():
@@ -107,13 +90,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.music_dir,
         )
 
-    await _bootstrap_admin_if_requested(ctx)
-
     # Значения, сохранённые в интерфейсе, лежат в таблице settings и главнее .env.
     # При старте переносим их в ctx.settings целиком, включая restart-ключи.
+    # Основные переопределения уже применены в AppContext.create — до того,
+    # как сканер и наблюдатель получили свои параметры. Здесь досинхронизируем
+    # то, что могло измениться: например, лимит транскодеров.
     applied = await apply_runtime_settings(ctx, include_restart=True)
     if applied:
-        logger.info("применены настройки из БД: %s", ", ".join(applied))
+        logger.debug("досинхронизированы настройки: %s", ", ".join(applied))
 
     # Уровень логов меняется только при старте: uvicorn и приложение уже
     # настроены выше, поэтому поднимаем/опускаем корневой логгер здесь.
@@ -133,6 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await app.state.warmer.shutdown()
         if ctx.watcher is not None:
             await ctx.watcher.stop()
         await ctx.close()
@@ -158,6 +143,7 @@ app.include_router(stream_router)
 app.include_router(subsonic_router)
 app.include_router(covers_router)
 app.include_router(web_api_router)
+app.include_router(folder_api_router)
 app.include_router(web_ui_router)
 
 

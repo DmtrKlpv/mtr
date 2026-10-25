@@ -43,6 +43,10 @@ RUN pip install --no-cache-dir --only-binary=:all: \
 # (он бы создал лишний слой, дублирующий весь код в образе).
 COPY --chown=1000:1000 app ./app
 
+# Скрипты обслуживания (самопроверка образа). Нужны внутри контейнера:
+# docker exec mtr-app sh /app/scripts/selfcheck.sh
+COPY --chown=1000:1000 scripts ./scripts
+
 # Каталог состояния: обе БД, ключ шифрования, кэш обложек.
 RUN mkdir -p /data/covers /music \
  && useradd --create-home --uid 1000 --user-group mtr \

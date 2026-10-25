@@ -1,6 +1,9 @@
 # Runtime-зависимости. Всё, что нужно контейнеру.
 aiosqlite==0.22.1
 mutagen==1.48.1
+# Pillow нужен для уменьшения обложек до 600px при прогреве. На armv7 есть
+# готовое колесо на piwheels (12.1.0, cp313), поэтому --only-binary не падает.
+Pillow==12.1.0
 cryptography==50.0.2
 fastapi==0.121.0
 uvicorn==0.40.0

@@ -17,6 +17,7 @@ import getpass
 import json
 import logging
 import sys
+import time
 
 from app.bootstrap import AppContext, ensure_bootstrap_admin
 from app.config import Settings
@@ -168,6 +169,108 @@ async def _cmd_purge_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_covers(args: argparse.Namespace) -> int:
+    """Готовит превью обложек заранее.
+
+    Извлечение картинки — самое дорогое место при показе сетки: разбор тегов
+    и чтение файла на каждую карточку. Здесь мы делаем это один раз, пачкой,
+    чтобы интерфейс потом отдавал готовые файлы.
+    """
+    ctx = await AppContext.create(Settings.from_env())
+    try:
+        if args.purge:
+            removed = await ctx.covers.purge_all()
+            print(f"удалено записей кеша: {removed}")
+            return 0
+
+        limit = None if not args.limit else max(1, int(args.limit))
+
+        # Замер встроен в саму команду: на armv7 через 9 секунд уже хочется
+        # знать «сколько на альбом» и «когда закончится», а не считать в уме.
+        started = time.monotonic()
+        result = await ctx.covers.warm(limit)
+        elapsed = time.monotonic() - started
+
+        print(
+            f"обработано {result['total']}: готово {result['made']}, "
+            f"без картинки {result['absent']}, ошибок {result['failed']}"
+        )
+        if result["total"] == 0:
+            print("все обложки уже готовы")
+            return 0
+
+        per_album = elapsed / max(1, result["total"])
+        print(f"прошло {elapsed:.1f} с ({per_album * 1000:.0f} мс на альбом)")
+
+        # Сколько осталось и сколько это займёт при той же скорости.
+        pending = await ctx.covers.pending_album_ids()
+        if pending:
+            eta = len(pending) * per_album
+            print(
+                f"осталось {len(pending)} альбомов — при той же скорости "
+                f"это {_human_duration(eta)}"
+            )
+            print("доготовить всё: python -m app.cli covers")
+        else:
+            print("недоделанных нет — кеш полон")
+
+        stats = await ctx.covers.stats()
+        if stats.get("count"):
+            print(
+                f"в кеше {stats['count']} обложек, "
+                f"{_human_size(stats.get('total_bytes', 0))} на диске"
+            )
+    finally:
+        await ctx.close()
+    return 0
+
+
+def _human_size(size: int) -> str:
+    """Размер по-человечески: 900 КБ, 12 МБ, 1.4 ГБ."""
+    value = float(max(0, size))
+    if value < 1024:
+        return f"{value:.0f} Б"
+    for unit in ("КБ", "МБ"):
+        value /= 1024
+        if value < 1024:
+            return f"{value:.0f} {unit}"
+    return f"{value / 1024:.1f} ГБ"
+
+
+def _human_duration(seconds: float) -> str:
+    """Длительность по-человечески: 40 с, 12 мин, 1 ч 20 мин."""
+    seconds = max(0.0, seconds)
+    if seconds < 1:
+        return "меньше секунды"
+    if seconds < 10:
+        return f"{seconds:.1f} с"
+    if seconds < 90:
+        return f"{seconds:.0f} с"
+    minutes = seconds / 60
+    # Порог «до 90 минут» здесь не годится: 3600 с — это ровно час, и он
+    # показывался как «60 мин». В часы переходим с 60 минут.
+    if minutes < 60:
+        return f"{minutes:.0f} мин"
+    hours = int(minutes // 60)
+    rest = int(minutes % 60)
+    if rest == 0:
+        return f"{hours} ч"
+    return f"{hours} ч {rest} мин"
+
+
+async def _cmd_bench_covers(args: argparse.Namespace) -> int:
+    """Меряет стоимость обложек: холодный путь против кеша."""
+    from app.bench_covers import bench_covers, format_bench
+
+    ctx = await AppContext.create(Settings.from_env())
+    try:
+        result = await bench_covers(ctx, albums=max(1, int(args.albums)))
+        print(format_bench(result))
+    finally:
+        await ctx.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mtr", description="MTR music server CLI")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -208,6 +311,29 @@ def build_parser() -> argparse.ArgumentParser:
         "purge-missing", help="удалить треки, чьи файлы исчезли"
     )
     p_purge.set_defaults(func=_cmd_purge_missing)
+
+    p_covers = sub.add_parser(
+        "covers", help="подготовить превью обложек (600px) заранее"
+    )
+    p_covers.add_argument(
+        "--limit", type=int, default=0,
+        help="сколько альбомов обработать за раз (0 — все)",
+    )
+    p_covers.add_argument(
+        "--purge", action="store_true",
+        help="очистить кеш обложек вместо прогрева",
+    )
+    p_covers.set_defaults(func=_cmd_covers)
+
+    p_bench = sub.add_parser(
+        "bench-covers",
+        help="замерить стоимость извлечения обложек и выигрыш от кеша",
+    )
+    p_bench.add_argument(
+        "--albums", type=int, default=60,
+        help="сколько альбомов взять в выборку (по умолчанию 60)",
+    )
+    p_bench.set_defaults(func=_cmd_bench_covers)
 
     return parser
 

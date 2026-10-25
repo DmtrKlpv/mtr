@@ -15,25 +15,22 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import (
-    FileResponse,
     JSONResponse,
     PlainTextResponse,
-    StreamingResponse,
 )
 
 from app.api.stream import build_stream_response
 from app.audio.ffmpeg import TranscodeBusy, TranscodeError
 from app.audio.profiles import ProfileError
-from app.audio.service import SourceMissing, TrackNotFound, parse_format, parse_offset
+from app.audio.service import SourceMissing, TrackNotFound, parse_offset
 from app.bootstrap import AppContext
 from app.repositories.library import LibraryRepository
 from app.subsonic import format as fmt
 from app.subsonic import playlists_api as pl
-from app.subsonic.auth import AuthContext, md5_hex
+from app.subsonic.auth import AuthContext
 from app.subsonic.deps import (
     require_admin,
     require_auth,
-    require_auth_binary,
     require_auth_or_session,
 )
 from app.subsonic.errors import ErrorCode, SubsonicError, missing
@@ -156,7 +153,7 @@ async def start_scan(
     """
     ctx = _ctx(request)
     mode = "full" if (fullScan or "").lower() in ("true", "1", "yes") else "incremental"
-    result = await ctx.scanner.scan(mode=mode)
+    await ctx.scanner.scan(mode=mode)
     count = await ctx.tracks.count_tracks()
     return ok_response(
         {

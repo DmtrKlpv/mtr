@@ -35,7 +35,6 @@ LOGIN_HTML = f"""<!DOCTYPE html>
 <main class="login-card">
   <img class="login-logo" src="/static/icon.svg" alt="" width="56" height="56">
   <h1>MTR</h1>
-  <p class="muted">Музыкальный сервер</p>
   <form id="login-form" autocomplete="on">
     <label for="username">Пользователь</label>
     <input id="username" name="username" autocomplete="username" required autofocus>
@@ -44,6 +43,7 @@ LOGIN_HTML = f"""<!DOCTYPE html>
            autocomplete="current-password" required>
     <div id="login-error" class="error" role="alert" hidden></div>
     <button type="submit" id="login-submit" class="primary">Войти</button>
+     <p class="muted">© Dmtr Klpv, DKI, 2026</p>
   </form>
 </main>
 <script src="/static/login.js"></script>
@@ -56,7 +56,7 @@ APP_HTML = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 {HEAD_COMMON}
-<title>MTR — музыка</title>
+<title>MTR</title>
 </head>
 <body>
 <div class="shell">
@@ -161,8 +161,44 @@ APP_HTML = f"""<!DOCTYPE html>
 </div>
 
 <script src="/static/dialogs.js"></script>
+<script src="/static/cover_queue.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/scan_import.js"></script>
+<script src="/static/folder_sync.js"></script>
+</body>
+</html>
+"""
+
+
+SETUP_HTML = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+{HEAD_COMMON}
+<title>Первый запуск — MTR</title>
+</head>
+<body class="login-body">
+<main class="login-card">
+  <img class="login-logo" src="/static/icon.svg" alt="" width="56" height="56">
+  <h1>MTR</h1>
+  <p class="muted">Первый запуск: создайте администратора</p>
+  <form id="setup-form" autocomplete="on">
+    <div><label for="username">Имя пользователя</label></div>
+    <div><input id="username" name="username" autocomplete="username"
+           value="admin" required autofocus></div>
+    <div><label for="password">Пароль</label></div>
+    <div><input id="password" name="password" type="password"
+           autocomplete="new-password" minlength="8" required></div>
+    <div><label for="password2">Пароль ещё раз</label></div>
+    <div><input id="password2" name="password2" type="password"
+           autocomplete="new-password" minlength="8" required></div>
+    <div id="setup-error" class="error" role="alert" hidden></div>
+    <button type="submit" id="setup-submit" class="primary">Создать и войти</button>
+  </form>
+  <p class="muted small" style="margin-top:14px">
+    <!-- Пароль хранится только в базе, в виде хеша. В файлах конфигурации его нет. -->
+  </p>
+</main>
+<script src="/static/setup.js"></script>
 </body>
 </html>
 """
@@ -171,6 +207,15 @@ APP_HTML = f"""<!DOCTYPE html>
 def render_login(error: str | None = None) -> str:
     """Логин-страница. Ошибку показывает JS, но можно передать сразу."""
     return LOGIN_HTML
+
+
+def render_setup() -> str:
+    """Страница первого запуска: создание администратора.
+
+    Нужна, чтобы не держать пароль в файлах: пока в базе нет ни одной учётной
+    записи, вход открывает именно эта форма.
+    """
+    return SETUP_HTML
 
 
 def render_app(username: str, role: str, csrf: str) -> str:

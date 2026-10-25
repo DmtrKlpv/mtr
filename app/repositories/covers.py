@@ -24,6 +24,7 @@ from app.covers.service import (
     CoverResolver,
     extract_cover,
     extract_from_directory,
+    make_thumbnail,
 )
 from app.db.database import Database
 from app.utils.timeutil import utcnow_iso
@@ -68,6 +69,9 @@ class CoverRepository:
         # Ограничитель именно для извлечения: чтение с диска не должно
         # занимать event loop и не должно идти сотнями потоков.
         self._semaphore = asyncio.Semaphore(COVER_EXTRACT_CONCURRENCY)
+        # Сколько запросов обложек от пользователя (сетка, плеер) выполняется
+        # прямо сейчас. Фоновый прогрев уступает, пока этот счётчик не ноль.
+        self._foreground = 0
         # Отрицательный кеш: ключ -> True. Храним в памяти процесса.
         self._missing: OrderedDict[str, None] = OrderedDict()
 
@@ -103,6 +107,10 @@ class CoverRepository:
         )
         if row is None:
             return None
+        if not str(row["file_path"] or ""):
+            # Маркер «проверено, картинки нет» — файла не существует.
+            self._remember_missing(key)
+            return None
         # Чтение файла блокирует поток: уводим в рабочий, иначе на медленном
         # томе встаёт весь event loop и интерфейс перестаёт отвечать.
         cover = await asyncio.to_thread(
@@ -117,6 +125,15 @@ class CoverRepository:
 
     async def store(self, key: str, cover: CoverData) -> None:
         """Сохраняет обложку и запись кэша (upsert по ключу)."""
+        # Уменьшаем один раз, при первом извлечении: дальше на диске лежит
+        # готовое превью, и отдача в сетку не требует ни разбора тегов, ни
+        # пересжатия на каждый запрос. Если Pillow не смог разобрать формат,
+        # сохраняем оригинал как есть.
+        thumb = await asyncio.to_thread(make_thumbnail, cover.data)
+        if thumb is not None:
+            data, mime = thumb
+            cover = CoverData(data, mime, cover.source)
+
         # Запись на диск тоже блокирующая.
         file_path, size = await asyncio.to_thread(
             self._resolver.store, key, cover
@@ -138,7 +155,19 @@ class CoverRepository:
     # ------------------------------------------------------------------
     # Разрешение для альбома
     # ------------------------------------------------------------------
-    async def for_album(self, album_id: int) -> CoverData | None:
+    async def for_album(
+        self, album_id: int, *, background: bool = False
+    ) -> CoverData | None:
+        """Обёртка со счётчиком переднего плана; логика в `_for_album`."""
+        if background:
+            return await self._for_album(album_id)
+        self._foreground += 1
+        try:
+            return await self._for_album(album_id)
+        finally:
+            self._foreground -= 1
+
+    async def _for_album(self, album_id: int) -> CoverData | None:
         """Обложка альбома: кеш, затем файл в каталоге, затем встроенные.
 
         Порядок выбран по стоимости: `cover.jpg` рядом с треками находится
@@ -187,7 +216,19 @@ class CoverRepository:
         logger.debug("обложка альбома %d (%s)", album_id, cover.source)
         return cover
 
-    async def for_track(self, track_id: int) -> CoverData | None:
+    async def for_track(
+        self, track_id: int, *, background: bool = False
+    ) -> CoverData | None:
+        """Обёртка со счётчиком переднего плана; логика в `_for_track`."""
+        if background:
+            return await self._for_track(track_id)
+        self._foreground += 1
+        try:
+            return await self._for_track(track_id)
+        finally:
+            self._foreground -= 1
+
+    async def _for_track(self, track_id: int) -> CoverData | None:
         """Обложка конкретного трека (для `tr-<id>`)."""
         key = f"tr-{track_id}"
         cached = await self.get_cached(key)
@@ -227,11 +268,112 @@ class CoverRepository:
         self._missing.pop(key, None)
         await self._db.execute("DELETE FROM cover_cache WHERE key = ?", (key,))
 
+    # ------------------------------------------------------------------
+    # Маркер «обложки нет» и прогрев
+    # ------------------------------------------------------------------
+    async def _mark_absent(self, key: str) -> None:
+        """Пишет в кеш запись «проверено, обложки нет».
+
+        Нужна прогреву: без неё он при каждом запуске заново перебирал бы
+        тысячи альбомов без картинок. Пустой file_path — признак маркера.
+        """
+        await self._db.execute(
+            "INSERT INTO cover_cache "
+            "(key, file_path, mime_type, size_bytes, source, created_at) "
+            "VALUES (?, '', 'none', 0, 'none', ?) "
+            "ON CONFLICT (key) DO NOTHING",
+            (key, utcnow_iso()),
+        )
+        self._remember_missing(key)
+
+    async def purge_all(self) -> int:
+        """Удаляет все превью: файлы в COVERS_DIR и записи cover_cache.
+
+        Файлы удаляются только внутри COVERS_DIR — проверка через relative_to,
+        чтобы ошибочный путь в БД не снёс что-то за пределами кеша.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT file_path FROM cover_cache WHERE file_path <> ''"
+        )
+        removed = 0
+        base = self._resolver.covers_dir.resolve()
+        for row in rows:
+            raw = str(row["file_path"])
+            candidate = (base / raw.split("/")[-1]).resolve()
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                continue
+            try:
+                if candidate.is_file():
+                    candidate.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        await self._db.execute("DELETE FROM cover_cache")
+        self.forget_missing()
+        return removed
+
+    @property
+    def foreground_busy(self) -> bool:
+        """Есть ли сейчас запросы обложек от пользователя."""
+        return self._foreground > 0
+
+    async def pending_album_ids(self, limit: int | None = None) -> list[int]:
+        """Альбомы, для которых обложка ещё не решена.
+
+        «Решена» = есть либо файл превью, либо маркер «нет картинки». Уже
+        просмотренные пользователем альбомы сюда не попадают, поэтому прогрев
+        после первого прохода почти ничего не делает.
+        """
+        sql = (
+            "SELECT a.id AS id FROM albums a "
+            "WHERE EXISTS (SELECT 1 FROM tracks t "
+            "              WHERE t.album_id = a.id AND t.missing = 0) "
+            "  AND NOT EXISTS (SELECT 1 FROM cover_cache c "
+            "                  WHERE c.key = 'al-' || a.id) "
+            "ORDER BY a.id"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (max(1, int(limit)),)
+        rows = await self._db.fetch_all(sql, params)
+        return [int(row["id"]) for row in rows]
+
+    async def warm(self, limit: int | None = None) -> dict[str, int]:
+        """Готовит превью для альбомов, у которых их ещё нет.
+
+        Возвращает счётчики: сколько сделано, сколько без картинки, сколько
+        сломалось. Идёт последовательно (семафор в for_album ограничивает
+        извлечение), чтобы не отбирать диск у воспроизведения.
+        """
+        ids = await self.pending_album_ids(limit)
+        made = absent = failed = 0
+        for album_id in ids:
+            key = f"al-{album_id}"
+            try:
+                cover = await self.for_album(album_id, background=True)
+            except Exception:  # noqa: BLE001 - один альбом не должен рвать прогрев
+                logger.exception("прогрев: ошибка на альбоме %d", album_id)
+                failed += 1
+                continue
+            if cover is None:
+                await self._mark_absent(key)
+                absent += 1
+            else:
+                made += 1
+        logger.info(
+            "прогрев обложек: готово %d, без картинки %d, ошибок %d",
+            made, absent, failed,
+        )
+        return {"total": len(ids), "made": made, "absent": absent, "failed": failed}
+
     async def stats(self) -> dict[str, int]:
         """Сколько обложек в кэше и сколько занимают."""
         row = await self._db.fetch_one(
             "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS total "
-            "FROM cover_cache"
+            "FROM cover_cache WHERE file_path <> ''"
         )
         if row is None:
             return {"count": 0, "total_bytes": 0}

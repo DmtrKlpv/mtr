@@ -102,8 +102,11 @@ class Settings:
         DATA_DIR    — каталог состояния: обе БД, ключ шифрования, кэш обложек.
         USERS_DB    — путь к mtr_users.db (по умолчанию DATA_DIR/mtr_users.db).
         MUSIC_DB    — путь к mtr_music.db (по умолчанию DATA_DIR/mtr_music.db).
-        MTR_SECRET_KEY      — ключ шифрования паролей (или парольная фраза).
-        MTR_SECRET_KEY_FILE — файл с ключом, если переменная не задана.
+        MTR_SECRET_KEY_FILE — файл с ключом шифрования. По умолчанию
+                              DATA_DIR/secret.key, создаётся автоматически при
+                              первом старте. Задавать переменную не нужно:
+                              ключ живёт в томе с данными и переживает
+                              пересоздание контейнера.
         """
         music_dir = _env_path("MUSIC_DIR", Path(DEFAULT_MUSIC_DIR))
         data_dir = _env_path("DATA_DIR", Path(DEFAULT_DATA_DIR))

@@ -35,6 +35,9 @@ class DoctorReport:
     tracks: int = 0
     tracks_missing: int = 0
     music_dir_exists: bool = False
+    # Признак того, что /music смонтирован, но пуст, а база при этом непустая:
+    # классическая ситуация «создался анонимный том вместо папки на хосте».
+    music_mount_suspicious: bool = False
     secret_len: int = 0
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -113,7 +116,49 @@ async def run_doctor(ctx: AppContext, *, secret: str | None = None) -> DoctorRep
             "почистить: python -m app.cli purge-missing"
         )
 
+    # --- проверка монтирования ---
+    await _check_mounts(ctx, report)
+
     return report
+
+
+async def _check_mounts(ctx: AppContext, report: DoctorReport) -> None:
+    """Ищет признак того, что вместо папки на хосте подключился пустой том.
+
+    Docker считает `-v ":/music"` валидной записью и создаёт анонимный том с
+    именем из хеша. Ошибки нет, но музыки внутри нет. Симптом: база полна
+    треков, а каталог пуст. Лечится указанием абсолютного пути на хосте.
+    """
+    music = ctx.settings.music_dir
+    if not music.exists():
+        return
+
+    try:
+        entries = sum(1 for _ in music.iterdir())
+    except OSError:
+        return
+
+    if report.tracks == 0:
+        return
+
+    # База помнит треки, а каталог пуст: почти наверняка смонтирован не тот том.
+    if entries == 0:
+        report.music_mount_suspicious = True
+        report.problems.append(
+            f"база знает {report.tracks} треков, но каталог {music} пуст — "
+            "похоже, вместо папки с музыкой смонтирован пустой том. "
+            "Проверьте docker inspect: источник у /music должен быть путём на "
+            "хосте (/share/...), а не .../volumes/<хеш>/_data"
+        )
+        return
+
+    # Дополнительный признак: файлов на диске заметно меньше, чем треков в базе.
+    if report.tracks > 50 and entries < report.tracks // 100:
+        report.music_mount_suspicious = True
+        report.problems.append(
+            f"в каталоге {music} всего {entries} записей при {report.tracks} "
+            "треках в базе — возможно, смонтирована не та папка"
+        )
 
 
 def format_report(report: DoctorReport) -> str:

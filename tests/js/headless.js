@@ -9,8 +9,10 @@ const vm = require('vm');
 
 const STATIC = path.join(__dirname, '..', '..', 'app', 'web', 'static');
 // В браузере это отдельные <script> в общем контексте. Здесь — так же:
-// app.js объявляет хелперы, scan_import.js на них опирается.
-const SOURCES = ['app.js', 'scan_import.js'].map((name) => ({
+// порядок как в templates.py: dialogs.js объявляет диалоги, cover_queue.js —
+// очередь загрузки обложек (app.js и scan_import.js вызывают coverQueue /
+// confirmDialog), app.js объявляет хелперы, scan_import.js на них опирается.
+const SOURCES = ['dialogs.js', 'cover_queue.js', 'app.js', 'scan_import.js', 'folder_sync.js'].map((name) => ({
   name,
   code: fs.readFileSync(path.join(STATIC, name), 'utf8'),
 }));
@@ -398,6 +400,21 @@ const viewText = () => textOf(nodeFor('#view'));
     await sandbox.setView('library');
     await sandbox.setView('playlists');
     if (!calls.length) throw new Error('нет запросов');
+  });
+
+  await check('импорт из папки: блоки сборки и ресинка есть в разделе', () => {
+    const nodes = sandbox.folderSyncSections();
+    const text = JSON.stringify(nodes, (k, v) => (k === 'parentNode' || k === 'listeners' || k === 'classList' ? undefined : v));
+    if (!text.includes('Сборка плейлиста из папки')) throw new Error('нет блока сборки');
+    if (!text.includes('Ресинк плейлиста с папкой')) throw new Error('нет блока ресинка');
+    if (!text.includes('Скрипт рекурсивно обходит папку (1-й уровень)')) throw new Error('нет описания из ТЗ');
+  });
+
+  await check('импорт из папки: функции опроса доступны из раздела', () => {
+    // setInterval в этом харнессе не подменён, поэтому здесь только наличие API.
+    for (const name of ['pollFolderJob', 'stopFolderPolling', 'renderResyncPlan']) {
+      if (typeof sandbox[name] !== 'function') throw new Error('нет ' + name);
+    }
   });
 
   console.log('');

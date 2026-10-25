@@ -24,10 +24,11 @@ from fastapi.responses import (
 )
 
 from app.bootstrap import AppContext
+from app.repositories.users import UserError
 from app.subsonic.auth import AuthThrottle, throttle_key
 from app.web.deps import current_page_session, get_ctx
 from app.web.sessions import CSRF_COOKIE, SESSION_COOKIE
-from app.web.templates import render_app, render_login
+from app.web.templates import render_app, render_login, render_setup
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["web-ui"])
@@ -59,7 +60,27 @@ async def login_page(
     session = await current_page_session(request)
     if session is not None:
         return RedirectResponse("/app", status_code=status.HTTP_303_SEE_OTHER)
+    # Учёток нет — предлагаем создать администратора, а не показываем форму
+    # входа, за которой некому открыть дверь.
+    if await ctx.users.count_users() == 0:
+        return RedirectResponse("/setup", status_code=status.HTTP_303_SEE_OTHER)
     return HTMLResponse(render_login())
+
+
+@router.get("/setup", response_class=HTMLResponse, include_in_schema=False,
+            response_model=None)
+async def setup_page(
+    request: Request, ctx: AppContext = Depends(get_ctx)
+) -> Response:
+    """Первый запуск: создание администратора.
+
+    Доступна только пока в базе нет ни одной учётной записи. Как только
+    администратор создан, страница закрывается — иначе это была бы дыра:
+    любой желающий мог бы добавить себе админский аккаунт.
+    """
+    if await ctx.users.count_users() > 0:
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    return HTMLResponse(render_setup())
 
 
 @router.post("/api/web/login", include_in_schema=False, response_model=None)
@@ -139,6 +160,63 @@ async def login_submit(
     return response
 
 
+@router.post("/api/web/setup", include_in_schema=False, response_model=None)
+async def setup_submit(
+    request: Request, ctx: AppContext = Depends(get_ctx)
+) -> Response:
+    """Создаёт первого администратора и сразу выдаёт сессию.
+
+    Работает только на пустой базе. Пароль проверяется теми же правилами, что
+    и везде (не короче 8 символов), и попадает в базу хешем — в файлах его нет.
+    """
+    if await ctx.users.count_users() > 0:
+        # Кто-то успел раньше: дальше только обычный вход.
+        return JSONResponse(
+            {"detail": "Администратор уже создан"}, status_code=409
+        )
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+
+    if not username or not password:
+        return JSONResponse(
+            {"detail": "Введите имя и пароль"}, status_code=400
+        )
+
+    try:
+        record = await ctx.users.create_user(
+            username, password, role="admin", display_name="Administrator"
+        )
+    except UserError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("не удалось создать первого администратора")
+        return JSONResponse(
+            {"detail": "Не удалось создать администратора"}, status_code=500
+        )
+
+    logger.warning("создан первый администратор %r через страницу первого запуска", username)
+
+    token, csrf = await ctx.sessions.create(record.id)
+    secure = bool(ctx.settings.cookie_secure)
+    response = JSONResponse({"ok": True, "user": username})
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        httponly=True, samesite="lax", secure=secure,
+        max_age=30 * 24 * 3600, path="/",
+    )
+    response.set_cookie(
+        CSRF_COOKIE, csrf,
+        httponly=False, samesite="lax", secure=secure,
+        max_age=30 * 24 * 3600, path="/",
+    )
+    return response
+
+
 @router.get("/app", response_class=HTMLResponse, include_in_schema=False,
             response_model=None)
 async def app_page(
@@ -176,14 +254,16 @@ async def static_file(filename: str):
     """
     from pathlib import Path
 
-    from fastapi.responses import FileResponse
 
     # Иконки — отдельный каталог и отдельный маршрут: разрешённый список
     # имён не смешивается с кодом и стилями.
     allowed = {
         "app.js": "application/javascript",
         "login.js": "application/javascript",
+        "setup.js": "application/javascript",
+        "cover_queue.js": "application/javascript",
         "scan_import.js": "application/javascript",
+        "folder_sync.js": "application/javascript",
         "dialogs.js": "application/javascript",
         "style.css": "text/css",
         "theme.css": "text/css",

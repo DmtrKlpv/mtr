@@ -9,7 +9,6 @@ lifespan FastAPI (этап 2) и явно прокидывается дальш�
 from __future__ import annotations
 
 import logging
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 from app.config import Settings
@@ -72,6 +71,21 @@ class AppContext:
         users_repo = UserRepository(users_db, cipher)
         sessions_repo = SessionRepository(users_db, users_repo)
         settings_repo = SettingsRepository(users_db)
+
+        # Переопределения из БД применяем ДО создания сканера и наблюдателя:
+        # иначе «период опроса» и «режим опроса» из интерфейса не доедут до
+        # watchfiles (он получает их в конструкторе) и до уровня логов.
+        # Настройки в БД главнее переменных окружения и файлов конфигурации.
+        stored = await settings_repo.all_overrides()
+        if stored:
+            import dataclasses
+            known = {f.name for f in dataclasses.fields(settings)}
+            applicable = {k: v for k, v in stored.items() if k in known}
+            if applicable:
+                settings = dataclasses.replace(settings, **applicable)
+                logger.info(
+                    "настройки из базы: %s", ", ".join(sorted(applicable))
+                )
         tracks_repo = TrackRepository(music_db)
         library_repo = LibraryRepository(music_db)
         playlists_repo = PlaylistRepository(music_db)

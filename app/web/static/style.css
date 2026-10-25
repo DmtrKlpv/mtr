@@ -1272,3 +1272,13 @@ label.inline {
   gap: 12px;
   margin: 16px 0 4px;
 }
+
+/* ---------- Импорт плейлистов из папки и ресинк ---------- */
+.hidden { display: none !important; }
+.folder-block { margin: 16px 0 24px; padding: 14px 16px; border: 1px solid var(--border, rgba(127,127,127,.25)); border-radius: 10px; }
+.folder-block h3 { margin-top: 0; }
+.folder-progress { margin: 10px 0; }
+.folder-progress .progress-fill { transition: width .3s ease; }
+.check-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; }
+.remove-list { max-height: 280px; overflow: auto; margin: 6px 0; }
+.block { display: block; }

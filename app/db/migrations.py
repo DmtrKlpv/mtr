@@ -26,7 +26,7 @@ SCHEMA_DIR = Path(__file__).resolve().parent
 SCHEMA_VERSION = 2
 # У музыкальной базы своя версия: она меняется чаще, и поднимать из-за этого
 # версию пользовательской базы (с паролями и сессиями) незачем.
-MUSIC_SCHEMA_VERSION = 3
+MUSIC_SCHEMA_VERSION = 4
 
 # v2: сессии веб-интерфейса. В v1 таблица sessions уже есть, но хранит
 # открытый id и не умеет CSRF. Миграция перестраивает её:
@@ -59,6 +59,22 @@ CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions (expires_at);
 MIGRATION_MUSIC_V3_ERRORS = """
 ALTER TABLE scan_runs ADD COLUMN errors_total INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE scan_runs ADD COLUMN errors_json TEXT;
+"""
+
+# v4 (только mtr_music.db): импорт плейлистов из папки и ресинк.
+#   * tracks: индекс по content_hash (поиск перемещённых файлов по хэшу);
+#   * tracks: составной индекс (artist, album, title) — запасной ключ поиска,
+#     когда хэш не посчитан (он ленивый). Не уникальный: дубли в библиотеке реальны;
+#   * playlists: origin_folder_path — папка, из которой собран плейлист;
+#     synced_at — когда последний раз проверяли папку;
+#   * playlist_tracks(playlist_id, position) — порядок и выборка для ресинка.
+MIGRATION_MUSIC_V4_FOLDER_SYNC = """
+CREATE INDEX IF NOT EXISTS ix_tracks_content_hash ON tracks (content_hash);
+CREATE INDEX IF NOT EXISTS ix_tracks_tags ON tracks (artist, album, title);
+ALTER TABLE playlists ADD COLUMN origin_folder_path TEXT;
+ALTER TABLE playlists ADD COLUMN synced_at TEXT;
+CREATE INDEX IF NOT EXISTS ix_playlists_origin ON playlists (origin_folder_path);
+CREATE INDEX IF NOT EXISTS ix_playlist_tracks_pos ON playlist_tracks (playlist_id, position);
 """
 
 
@@ -114,6 +130,11 @@ async def _migrate_music(db: Database) -> None:
     elif current < 3:
         logger.info("mtr_music.db: применяю миграцию v3 (ошибки сканирования)")
         await db.executescript(MIGRATION_MUSIC_V3_ERRORS)
+    if current < 4:
+        # Для свежей базы сюда попадаем после базовой схемы (она v3-эквивалентна),
+        # поэтому ALTER из v4 применяется ровно один раз в любом пути.
+        logger.info("mtr_music.db: применяю миграцию v4 (импорт папок, индексы)")
+        await db.executescript(MIGRATION_MUSIC_V4_FOLDER_SYNC)
 
     await db.set_user_version(MUSIC_SCHEMA_VERSION)
     logger.info("mtr_music.db готова, версия схемы %d", MUSIC_SCHEMA_VERSION)

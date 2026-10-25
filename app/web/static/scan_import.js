@@ -322,6 +322,7 @@ function drawScanStatus(node, current, status) {
 
 /* ---------- Импорт плейлистов ---------- */
 async function renderImport(view) {
+  stopFolderPolling();
   const settings = await api('/api/web/settings');
   const items = settings.items || [];
   const dirItem = items.find((item) => item.key === 'playlists_dir');
@@ -389,6 +390,7 @@ async function renderImport(view) {
 
   fill(view,
     el('h2', {}, 'Импорт плейлистов'),
+    ...folderSyncSections(),
     el('p', { class: 'muted small' },
       'Находит .m3u и .m3u8 во всех подпапках указанного каталога. ' +
       'Пустое поле — поиск по всей библиотеке.'),

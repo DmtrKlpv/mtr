@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -38,8 +37,7 @@ from fastapi.responses import JSONResponse, Response
 from app.bootstrap import AppContext
 from app.subsonic.auth import AuthContext
 from app.subsonic.deps import require_auth, require_auth_or_session
-from app.subsonic.errors import ErrorCode, SubsonicError
-from app.subsonic.response import ok_response
+from app.subsonic.errors import SubsonicError
 
 logger = logging.getLogger(__name__)
 

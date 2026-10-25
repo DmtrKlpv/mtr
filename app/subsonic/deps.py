@@ -101,7 +101,6 @@ async def require_auth_or_session(request: Request) -> AuthContext | None:
         return await _authenticate(request)
 
     from app.web.sessions import SESSION_COOKIE
-    from app.web.sessions import SessionRepository
 
     ctx: AppContext = request.app.state.ctx
     token = request.cookies.get(SESSION_COOKIE)

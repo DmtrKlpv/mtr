@@ -170,6 +170,63 @@ def _from_ogg(path: Path) -> CoverData | None:
     return CoverData(picture.data, _mime_of(picture.data), "ogg:picture")
 
 
+# Максимальная сторона сохраняемой обложки, px.
+#
+# Выбрано по фактическим размерам в интерфейсе: карточка в сетке занимает
+# ~169-185 CSS px, то есть до ~370 физических пикселей при DPR 2. Крупная
+# обложка в карточке альбома ограничена max-width: 420px (.album-hero-cover),
+# при DPR 2 это 840 px — там 600 чуть мягче, но это одна картинка на экран.
+# Всё, что больше, — лишние мегабайты по сети и лишняя работа при отдаче.
+MAX_COVER_SIDE = 600
+
+# Качество JPEG для пересжатых обложек. 82 — точка, где на глаз не отличить
+# от оригинала, а файл в разы меньше.
+JPEG_QUALITY = 82
+
+
+def make_thumbnail(
+    data: bytes, *, max_side: int = MAX_COVER_SIDE
+) -> tuple[bytes, str] | None:
+    """Уменьшает картинку до max_side по большей стороне.
+
+    Возвращает (байты, mime) или None, если Pillow не смог разобрать формат —
+    тогда вызывающий код сохранит оригинал как есть.
+
+    Переводим в RGB: у PNG-обложек бывает альфа-канал, а JPEG его не хранит.
+    Белая подложка вместо чёрной — обложки почти всегда светлые по краям.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image, ImageOps
+    except ImportError:
+        logger.warning("Pillow не установлен — обложки сохраняются без уменьшения")
+        return None
+
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            # Учитываем EXIF-поворот: иначе четверть обложек с телефонов
+            # сохранится лёжа.
+            try:
+                image = ImageOps.exif_transpose(image)
+            except Exception:  # noqa: BLE001 - EXIF битый, поворот не критичен
+                pass
+
+            if max(image.size) <= max_side:
+                return None  # уже маленькая: пересжимать вредно
+
+            image = image.convert("RGB")
+            image.thumbnail((max_side, max_side), Image.LANCZOS)
+
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+            return buffer.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001 - битая картинка не повод падать
+        logger.debug("не удалось уменьшить обложку", exc_info=True)
+        return None
+
+
 def extract_embedded(path: Path) -> CoverData | None:
     """Пробует все встроенные источники по расширению файла."""
     suffix = path.suffix.lower()

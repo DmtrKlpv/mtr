@@ -737,34 +737,64 @@ async def purge_covers(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(admin_csrf),
 ) -> JSONResponse:
-    """Чистит кэш обложек: записи в БД и файлы на диске."""
-    rows = await ctx.music_db.fetch_all("SELECT file_path FROM cover_cache")
-    removed = 0
-    covers_dir = ctx.settings.covers_dir.resolve()
-    for row in rows:
-        raw = str(row["file_path"])
-        candidate = (covers_dir / raw.split("/")[-1]).resolve()
-        # Защита: удаляем только внутри COVERS_DIR.
-        try:
-            candidate.relative_to(covers_dir)
-        except ValueError:
-            continue
-        try:
-            if candidate.is_file():
-                candidate.unlink()
-                removed += 1
-        except OSError:
-            continue
-    await ctx.music_db.execute("DELETE FROM cover_cache")
-    # Отрицательный кеш держится в памяти: после очистки обложки должны
-    # искаться заново, иначе отсутствие картинки запомнится навсегда.
-    ctx.covers.forget_missing()
-    return _ok({"files_removed": removed, "rows": len(rows)})
+    """Чистит кеш обложек: записи в БД и файлы на диске.
+
+    Логика живёт в репозитории, чтобы CLI (`covers --purge`) делал ровно то
+    же самое, а не свою копию.
+    """
+    removed = await ctx.covers.purge_all()
+    return _ok({"files_removed": removed})
 
 
-# ----------------------------------------------------------------------
-# Свой аккаунт
-# ----------------------------------------------------------------------
+@router.post("/covers/warm")
+async def warm_covers(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(admin_csrf),
+) -> JSONResponse:
+    """Запускает фоновый прогрев обложек и сразу возвращает статус.
+
+    Прогрев не держит HTTP-запрос: он идёт отдельной задачей, уступает
+    открытию сетки и стримам. Следить — GET /api/web/covers/warm, остановить —
+    POST /api/web/covers/warm/cancel. Повторный запуск во время работы
+    ничего не ломает: вернётся текущий статус.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    raw_limit = body.get("limit") if isinstance(body, dict) else None
+    try:
+        limit = int(raw_limit) if raw_limit else None
+    except (TypeError, ValueError):
+        return _fail("limit должен быть числом")
+    warmer = request.app.state.warmer
+    started = await warmer.start(limit)
+    payload = warmer.status.as_dict()
+    payload["started"] = started
+    return _ok(payload)
+
+
+@router.get("/covers/warm")
+async def warm_status(
+    request: Request,
+    session: SessionRecord = Depends(require_admin),
+) -> JSONResponse:
+    """Состояние прогрева: сколько сделано, сколько осталось, оценка времени."""
+    return _ok(request.app.state.warmer.status.as_dict())
+
+
+@router.post("/covers/warm/cancel")
+async def warm_cancel(
+    request: Request,
+    session: SessionRecord = Depends(admin_csrf),
+) -> JSONResponse:
+    """Останавливает прогрев. Готовые превью остаются, продолжить можно позже."""
+    warmer = request.app.state.warmer
+    was_running = await warmer.cancel()
+    return _ok({"cancelled": was_running, **warmer.status.as_dict()})
+
+
 @router.post("/account/password")
 async def change_own_password(
     request: Request,
@@ -1057,27 +1087,28 @@ async def get_settings(
 
 
 def _readonly_settings(ctx: AppContext) -> list[dict[str, Any]]:
-    """Параметры запуска, меняющиеся только через .env и перезапуск."""
+    """Только для чтения: что задаётся при создании контейнера.
+
+    Эти значения нельзя менять из интерфейса, потому что они определяют, куда
+    смонтированы тома, — их задаёт `docker compose` в `docker-compose.yml`.
+    Показываем их здесь, чтобы всё было видно в одном месте.
+    """
     settings = ctx.settings
     return [
         {"key": "MUSIC_DIR", "label": "Каталог музыки",
          "value": str(settings.music_dir),
-         "help": "Куда смонтирована библиотека (MUSIC_PATH в docker-compose)."},
+         "help": "Куда смонтирована библиотека. Задаётся в docker-compose.yml."},
         {"key": "DATA_DIR", "label": "Каталог состояния",
          "value": str(settings.data_dir),
-         "help": "Базы, ключ шифрования и кэш обложек (DATA_PATH)."},
-        {"key": "MTR_PORT", "label": "Порт",
-         "value": "4533", "help": "Внутри контейнера порт всегда 4533 (MTR_PORT)."},
+         "help": "Базы, ключ шифрования и кэш обложек. Задаётся в docker-compose.yml."},
         {"key": "MTR_SECRET_KEY", "label": "Ключ шифрования",
          "value": ("из файла " + str(settings.secret_key_file))
-                  if settings.secret_key is None else "задан в .env",
-         "help": "Смена ключа делает сохранённые пароли нечитаемыми."},
-        {"key": "MTR_ADMIN_USER", "label": "Стартовый администратор",
-         "value": "создаётся только на пустой базе",
-         "help": "Дальше учётные записи ведутся на странице «Пользователи»."},
-        {"key": "MTR_LOG_LEVEL", "label": "Уровень логов (.env)",
-         "value": settings.log_level,
-         "help": "Переопределяется одноимённой настройкой выше."},
+                  if settings.secret_key is None else "задан переменной окружения",
+         "help": "Создаётся автоматически при первом старте и лежит в томе /data. "
+                 "Смена ключа делает сохранённые пароли нечитаемыми."},
+        {"key": "users", "label": "Учётные записи",
+         "value": "ведутся на странице «Пользователи»",
+         "help": "Пароли хранятся хешем в базе, в файлах конфигурации их нет."},
     ]
 
 
