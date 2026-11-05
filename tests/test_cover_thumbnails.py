@@ -175,6 +175,13 @@ async def test_absent_marker_does_not_repeat_lookup(ctx, music_dir: Path, monkey
     path = make_mp3(music_dir / "one" / "t.mp3", seconds=0.2)
     tag_mp3(path, title="T", artist="A", album="Alb")
     await ctx.scanner.scan(mode="full")
+    # Фоновая фаза обложек стартует после скана и пишет в ту же базу.
+    # Дождаться её, иначе она может извлечь обложку во время проверки.
+    import asyncio as _asyncio
+    for _ in range(500):
+        if not ctx.cover_pass.running:
+            break
+        await _asyncio.sleep(0.02)
     album_id = int(await ctx.music_db.fetch_value("SELECT album_id FROM tracks LIMIT 1"))
     await ctx.covers._mark_absent(f"al-{album_id}")
 

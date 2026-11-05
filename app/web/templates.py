@@ -177,20 +177,29 @@ SETUP_HTML = f"""<!DOCTYPE html>
 <title>Первый запуск — MTR</title>
 </head>
 <body class="login-body">
-<main class="login-card">
-  <img class="login-logo" src="/static/icon.svg" alt="" width="56" height="56">
-  <h1>MTR</h1>
-  <p class="muted">Первый запуск: создайте администратора</p>
+<main class="login-card setup-card">
+  <div class="setup-head">
+    <img class="login-logo" src="/static/icon.svg" alt="" width="56" height="56">
+    <h1>MTR</h1>
+    <p class="muted">Первый запуск: создайте администратора</p>
+  </div>
   <form id="setup-form" autocomplete="on">
-    <div><label for="username">Имя пользователя</label></div>
-    <div><input id="username" name="username" autocomplete="username"
-           value="admin" required autofocus></div>
-    <div><label for="password">Пароль</label></div>
-    <div><input id="password" name="password" type="password"
-           autocomplete="new-password" minlength="8" required></div>
-    <div><label for="password2">Пароль ещё раз</label></div>
-    <div><input id="password2" name="password2" type="password"
-           autocomplete="new-password" minlength="8" required></div>
+    <div class="field">
+      <label for="username">Имя пользователя</label>
+      <input id="username" name="username" autocomplete="username"
+             value="admin" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password"
+             autocomplete="new-password" minlength="8" required>
+      <span class="field-hint">Не короче 8 символов</span>
+    </div>
+    <div class="field">
+      <label for="password2">Пароль ещё раз</label>
+      <input id="password2" name="password2" type="password"
+             autocomplete="new-password" minlength="8" required>
+    </div>
     <div id="setup-error" class="error" role="alert" hidden></div>
     <button type="submit" id="setup-submit" class="primary">Создать и войти</button>
   </form>

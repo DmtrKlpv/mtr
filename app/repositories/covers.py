@@ -60,6 +60,13 @@ def _search_cover_files(
     return None
 
 
+def _is_file(file_path: str) -> bool:
+    try:
+        return Path(file_path).is_file()
+    except OSError:
+        return False
+
+
 class CoverRepository:
     """Кэш обложек: метаданные в БД, байты в COVERS_DIR."""
 
@@ -206,26 +213,60 @@ class CoverRepository:
         logger.debug("обложка альбома %d (%s)", album_id, cover.source)
         return cover
 
-    async def pending_album_ids(self, limit: int | None = None) -> list[int]:
-        """Альбомы с треками, у которых ещё нет записи в кеше (ни файла, ни маркера).
+    async def pending_album_ids(
+        self, *, mode: str = "incremental", limit: int | None = None
+    ) -> list[int]:
+        """Альбомы, которым нужна обложка.
 
-        Маркер «обложки нет» сохраняется в БД, поэтому альбом без картинки
-        не проверяется повторно после каждого скана.
+        Инкрементальный проход берёт:
+          1. альбомы без записи в cover_cache (новые);
+          2. альбомы, у которых трек обновлён позже, чем записана обложка;
+          3. альбомы, у которых запись есть, но файл превью пропал с диска.
+
+        Полный проход снимает маркеры «картинки нет» (это делает CoverPass) и
+        берёт те же альбомы; разница в том, что маркеров уже нет.
         """
         sql = (
             "SELECT a.id AS id FROM albums a "
             "WHERE EXISTS (SELECT 1 FROM tracks t "
             "              WHERE t.album_id = a.id AND t.missing = 0) "
-            "  AND NOT EXISTS (SELECT 1 FROM cover_cache c "
-            "                  WHERE c.key = 'al-' || a.id) "
-            "ORDER BY a.id"
+            "  AND ("
+            "    NOT EXISTS (SELECT 1 FROM cover_cache c "
+            "                WHERE c.key = 'al-' || a.id)"
         )
-        params: tuple[object, ...] = ()
+        if mode != "full":
+            sql += (
+                " OR EXISTS (SELECT 1 FROM cover_cache c "
+                "            WHERE c.key = 'al-' || a.id "
+                "              AND c.file_path <> '' "
+                "              AND EXISTS (SELECT 1 FROM tracks t2 "
+                "                          WHERE t2.album_id = a.id "
+                "                            AND t2.missing = 0 "
+                "                            AND t2.updated_at > c.created_at))"
+            )
+        sql += ") ORDER BY a.id"
+        rows = await self._db.fetch_all(sql)
+        ids = {int(row["id"]) for row in rows}
+
+        if mode != "full":
+            cached = await self._db.fetch_all(
+                "SELECT key, file_path FROM cover_cache "
+                "WHERE file_path <> '' AND key LIKE 'al-%'"
+            )
+            for row in cached:
+                try:
+                    album_id = int(str(row["key"])[3:])
+                except ValueError:
+                    continue
+                if album_id in ids:
+                    continue
+                if not await asyncio.to_thread(_is_file, str(row["file_path"])):
+                    ids.add(album_id)
+
+        result = sorted(ids)
         if limit is not None:
-            sql += " LIMIT ?"
-            params = (max(1, int(limit)),)
-        rows = await self._db.fetch_all(sql, params)
-        return [int(row["id"]) for row in rows]
+            result = result[: max(1, int(limit))]
+        return result
 
     async def mark_absent(self, key: str) -> None:
         """Пишет в БД маркер «картинки нет» (file_path пустой, см. get_cached)."""
@@ -334,6 +375,29 @@ class CoverRepository:
         await self._db.execute("DELETE FROM cover_cache")
         self.forget_missing()
         return removed
+
+    async def ready_keys(self, keys: list[str]) -> dict[str, str]:
+        """Состояние обложек пачкой, без извлечения и без чтения файлов.
+
+        Возвращает {key: "ready" | "absent"} только для ключей, у которых уже есть
+        запись в cover_cache. Ключей без записи в словаре нет: клиент их не знает
+        и ничего не запрашивает, пока фоновая фаза не дойдёт до них.
+        Читается только таблица БД: это дешёвый запрос даже во время скана.
+        """
+        unique = list(dict.fromkeys(k for k in keys if k))[:500]
+        if not unique:
+            return {}
+        marks = ",".join("?" for _ in unique)
+        rows = await self._db.fetch_all(
+            f"SELECT key, file_path FROM cover_cache WHERE key IN ({marks})",
+            tuple(unique),
+        )
+        result: dict[str, str] = {}
+        for row in rows:
+            key = str(row["key"])
+            # Пустой file_path — маркер «картинки нет».
+            result[key] = "ready" if str(row["file_path"] or "") else "absent"
+        return result
 
     async def stats(self) -> dict[str, int]:
         """Сколько обложек в кэше и сколько занимают."""

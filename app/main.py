@@ -35,6 +35,7 @@ from app.subsonic.errors import SubsonicError
 from app.subsonic.response import error_response
 from app.subsonic.router import router as subsonic_router
 from app.config import Settings
+from app.utils.activity import ActivityMiddleware
 from app.diagnostics import log_startup_warnings
 from app.security.http import (
     SecurityHeadersMiddleware,
@@ -104,10 +105,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Наблюдатель создаётся всегда (чтобы интервал можно было включить из UI),
     # но фоновые задачи запускаем только когда он реально нужен.
-    if ctx.watcher is not None and (
-        ctx.settings.watch_enabled or ctx.settings.scan_interval_sec > 0
-    ):
-        await ctx.watcher.start()
+    # Скан, наблюдатель и фаза обложек — в отдельном worker-процессе (см. app/worker).
+    # Веб-процесс только ставит команды и читает статус.
+    from app.worker.ipc import ActivityStamp, stamp_path
+    from app.worker.supervisor import WorkerSupervisor
+
+    app.state.activity = ActivityStamp(stamp_path(settings.data_dir))
+    supervisor = WorkerSupervisor(settings)
+    app.state.supervisor = supervisor
+    await supervisor.start()
     # Проблема с ключом шифрования выглядит для клиента как код 40 —
     # показываем её в логе сразу, а не оставляем оператора гадать.
     await log_startup_warnings(ctx, secret=settings.secret_key)
@@ -115,8 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        if ctx.watcher is not None:
-            await ctx.watcher.stop()
+        await app.state.supervisor.stop()
         await ctx.close()
         logger.info("сервер остановлен")
 
@@ -135,6 +140,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if _docs_enabled else None,
 )
 app.add_middleware(SecurityHeadersMiddleware)
+# Отметка пользовательской активности для фазы обложек (см. utils/activity.py).
+app.add_middleware(ActivityMiddleware)
 
 app.include_router(stream_router)
 app.include_router(subsonic_router)

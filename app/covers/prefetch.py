@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 ALBUM_TIMEOUT_SEC = 20.0
 # Пауза между альбомами: отдаём event loop и диск обычным запросам.
 PAUSE_SEC = 0.05
+# Шаг проверки активности пользователя и предельное ожидание альбома.
+QUIET_STEP_SEC = 0.5
 
 
 class CoverPass:
@@ -41,8 +43,16 @@ class CoverPass:
         *,
         album_timeout: float = ALBUM_TIMEOUT_SEC,
         pause: float = PAUSE_SEC,
+        activity=None,
+        max_wait: float | None = None,
     ) -> None:
         self._covers = covers
+        # Источник «пользователь сейчас активен». По умолчанию — общий трекер запросов.
+        from app.utils.activity import ACTIVITY, MAX_WAIT_SEC
+
+        self._activity = activity or ACTIVITY
+        self._max_wait = MAX_WAIT_SEC if max_wait is None else max_wait
+        self.paused_for_user = False
         self._timeout = max(1.0, album_timeout)
         self._pause = max(0.0, pause)
         self._task: asyncio.Task | None = None
@@ -61,6 +71,14 @@ class CoverPass:
         self._album_started: float | None = None
 
     # ------------------------------------------------------------------
+    def set_activity(self, activity) -> None:
+        """Источник «пользователь активен»: файл в worker-процессе, трекер в тестах."""
+        self._activity = activity
+
+    def set_max_wait(self, seconds: float) -> None:
+        """Сколько фаза ждёт одного альбома из-за активности. Меняется без перезапуска."""
+        self._max_wait = max(1.0, float(seconds))
+
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -107,9 +125,13 @@ class CoverPass:
             if mode == "full":
                 cleared = await self._covers.clear_absent_markers()
                 logger.info("полный скан: снято маркеров отсутствия обложек: %d", cleared)
-            pending = await self._covers.pending_album_ids()
+            pending = await self._covers.pending_album_ids(mode=mode)
             self.total = len(pending)
             for album_id in pending:
+                if self._cancel:
+                    self.state = "cancelled"
+                    break
+                await self._wait_for_quiet()
                 if self._cancel:
                     self.state = "cancelled"
                     break
@@ -131,6 +153,18 @@ class CoverPass:
             if self._restart and not self._cancel:
                 self._restart = False
                 self.start("incremental")
+
+    async def _wait_for_quiet(self) -> None:
+        """Ждёт, пока пользователь не перестанет листать (не дольше MAX_WAIT_SEC).
+
+        Фон уступает запросам из браузера, но не голодает: через лимит идёт дальше.
+        """
+        waited = 0.0
+        while self._activity.busy() and waited < self._max_wait and not self._cancel:
+            self.paused_for_user = True
+            await asyncio.sleep(QUIET_STEP_SEC)
+            waited += QUIET_STEP_SEC
+        self.paused_for_user = False
 
     async def _one(self, album_id: int) -> None:
         self.current_album = album_id
@@ -195,6 +229,7 @@ class CoverPass:
             "failed": self.failed,
             "percent": percent,
             "current_album": self.current_album,
+            "paused_for_user": self.paused_for_user,
             # Сколько уже занимает текущий альбом: видно, что фаза не встала.
             "current_album_sec": round(time.monotonic() - self._album_started, 1)
             if self.current_album is not None and self._album_started else None,

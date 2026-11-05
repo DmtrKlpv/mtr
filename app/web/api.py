@@ -37,6 +37,16 @@ from app.web.deps import (
     require_admin,
 )
 from app.web.sessions import SessionRecord
+from app.playlists.import_jobs import ImportJobs, run_import
+from app.scanner.state import ScanState
+from app.worker.ipc import enqueue, read_status, status_path, worker_alive
+
+# Фаза обложек до первого статуса worker-а: ничего не делает.
+IDLE_COVERS = {
+    "state": "idle", "total": 0, "done": 0, "made": 0, "absent": 0, "failed": 0,
+    "percent": 0, "current_album": None, "current_album_sec": None,
+    "elapsed_sec": None, "eta_sec": None, "last_error": None, "paused_for_user": False,
+}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/web", tags=["web"])
@@ -179,6 +189,22 @@ async def stats(
     )
 
 
+@router.get("/covers/ready")
+async def covers_ready(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(current_session),
+    keys: str = Query("", max_length=8000),
+) -> JSONResponse:
+    """Готовность обложек пачкой: ready / absent для уже известных ключей.
+
+    Не извлекает обложки и не читает файлы. Ключи вида al-<id> и tr-<id>.
+    Неизвестные ключи в ответе отсутствуют: клиент их не запрашивает.
+    """
+    raw = [part.strip() for part in keys.split(",") if part.strip()]
+    valid = [k for k in raw if k[:3] in ("al-", "tr-") and k[3:].isdigit()]
+    return _ok({"ready": await ctx.covers.ready_keys(valid)})
+
+
 @router.get("/albums")
 async def albums(
     ctx: AppContext = Depends(get_ctx),
@@ -223,6 +249,8 @@ async def album_detail(
             "id": album.id,
             "name": album.name,
             "artist": album.artist_name,
+            # Нужен для ссылки на альбомы исполнителя прямо со страницы альбома.
+            "artist_id": album.artist_id,
             "year": album.year,
             "tracks": [
                 {
@@ -232,6 +260,8 @@ async def album_detail(
                     "album": track.album,
                     "duration": track.duration_sec,
                     "track_number": track.track_number,
+                    # Обложка трека берётся из альбома (al-<id>): только эти ключи кешируются.
+                    "album_id": album.id,
                 }
                 for track in tracks
             ],
@@ -339,19 +369,16 @@ async def record_play_event(
     return _ok({"track_id": track_id})
 
 
-# Фоновые задачи сканирования: держим ссылку, иначе asyncio может собрать её раньше.
-_SCAN_TASKS: set[asyncio.Task] = set()
-
-
-async def _run_scan(ctx: AppContext, mode: str) -> None:
-    """Фоновый проход. Результат виден через /scan/status, а не в HTTP-ответе."""
-    state = ctx.scan_state
-    try:
-        await ctx.scanner.scan(mode=mode)
-        await state.finish(status="completed")
-    except Exception as exc:  # noqa: BLE001 - причину показываем в UI
-        logger.exception("скан из веб-интерфейса не удался")
-        await state.fail(str(exc))
+async def _no_worker(ctx: AppContext) -> JSONResponse | None:
+    """Возвращает ответ 503, если worker-процесс не отвечает. Иначе None."""
+    status = read_status(status_path(ctx.settings.data_dir))
+    if worker_alive(status):
+        return None
+    return _fail(
+        "Служба сканирования не запущена. Смотрите журнал контейнера: "
+        "worker перезапускается автоматически.",
+        503,
+    )
 
 
 @router.post("/scan")
@@ -360,23 +387,21 @@ async def trigger_scan(
     session: SessionRecord = Depends(admin_csrf),
     mode: str = Query("incremental"),
 ) -> JSONResponse:
-    """Запускает скан в фоне и сразу отвечает 202.
+    """Ставит скан в очередь worker-процесса и сразу отвечает 202.
 
-    Раньше ответ ждал конца скана, и интерфейс не видел прогресса, пока
-    не обновят страницу. Теперь клиент опрашивает GET /scan/status.
+    Скан идёт в отдельном процессе: веб-сервер не делит с ним соединение и event loop.
+    Прогресс — через GET /scan/status.
     """
     if mode not in ("full", "incremental"):
-        raise HTTPException(
-            status_code=400, detail="mode must be full or incremental"
-        )
-    state = ctx.scan_state
-    if not await state.begin(mode):
-        # Уже идёт: не запускаем второй проход, отдаём текущее состояние.
+        raise HTTPException(status_code=400, detail="mode must be full or incremental")
+    unavailable = await _no_worker(ctx)
+    if unavailable is not None:
+        return unavailable
+    status = read_status(status_path(ctx.settings.data_dir))
+    if (status.get("scan") or {}).get("status") == "running":
         return _fail("Сканирование уже выполняется", 409)
-    task = asyncio.create_task(_run_scan(ctx, mode), name=f"scan-{mode}")
-    _SCAN_TASKS.add(task)
-    task.add_done_callback(_SCAN_TASKS.discard)
-    return _ok({"started": True, "mode": mode, **state.as_dict()}, status_code=202)
+    await enqueue(ctx.music_db, "scan", {"mode": mode})
+    return _ok({"started": True, "mode": mode, "queued": True}, status_code=202)
 
 
 @router.get("/scan/status")
@@ -384,22 +409,19 @@ async def scan_status(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
 ) -> JSONResponse:
-    """Текущее состояние и прогресс. Опрашивается, пока идёт скан.
+    """Состояние скана и фазы обложек из статуса worker-процесса.
 
-    Плюс последний завершённый проход из БД: после перезапуска контейнера
-    состояние в памяти пустое, а история должна остаться.
+    Плюс последний завершённый проход из БД: после перезапуска контейнера история остаётся.
     """
+    status = read_status(status_path(ctx.settings.data_dir))
+    alive = worker_alive(status)
     payload = {
-        "current": ctx.scan_state.as_dict(),
-        "covers": ctx.cover_pass.as_dict(),
-        "watcher": None,
+        "current": status.get("scan") or ScanState().as_dict(),
+        "covers": status.get("covers") or IDLE_COVERS,
+        "watcher": status.get("watcher"),
+        "worker": {"alive": alive, "heartbeat": status.get("heartbeat")},
         "last_run": None,
     }
-    if ctx.watcher is not None:
-        payload["watcher"] = {
-            "state": ctx.watcher.state,
-            "pending": ctx.watcher.pending,
-        }
     row = await ctx.music_db.fetch_one(
         "SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1"
     )
@@ -748,9 +770,27 @@ async def server_info(
             "subsonic_api_version": settings.subsonic_api_version,
             "tracks": library.get("tracks", 0),
             "missing": library.get("missing", 0),
+            # Раньше это была плашка на главной; теперь строка во вкладке «Сервер».
+            "users": await ctx.users.count_users(),
             "covers": covers,
         }
     )
+
+
+@router.post("/covers/warm")
+async def warm_covers(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(admin_csrf),
+) -> JSONResponse:
+    """Пересканирование обложек: ставит команду worker-у запустить фазу обложек.
+
+    Кнопка перенесена в раздел «Сканирование»: там же, где сам скан.
+    """
+    unavailable = await _no_worker(ctx)
+    if unavailable is not None:
+        return unavailable
+    await enqueue(ctx.music_db, "covers", {"mode": "incremental"})
+    return _ok({"queued": True}, status_code=202)
 
 
 @router.post("/covers/purge")
@@ -821,6 +861,7 @@ def _track_json(track) -> dict:
         "album": track.album,
         "duration": track.duration_sec,
         "track_number": track.track_number,
+        "album_id": track.album_id,
     }
 
 
@@ -996,6 +1037,7 @@ async def list_artists(
     # альбома. Раньше это был отдельный запрос на каждого исполнителя —
     # на 5000 записей выходило 5000 обращений; теперь один запрос на страницу.
     album_map = await ctx.library.artist_album_map([artist.id for artist in rows])
+    track_counts = await ctx.library.artist_track_counts([artist.id for artist in rows])
     return _ok(
         {
             "items": [
@@ -1003,6 +1045,7 @@ async def list_artists(
                     "id": artist.id,
                     "name": artist.name,
                     "album_count": artist.album_count,
+                    "track_count": track_counts.get(artist.id, 0),
                     "album_id": album_map.get(artist.id),
                 }
                 for artist in rows
@@ -1052,7 +1095,7 @@ async def get_settings(
         {
             "items": await ctx.settings_repo.describe(),
             # Параметры, которые нельзя менять из интерфейса. Показываем их
-            # только для чтения, чтобы всё из .env было видно в одном месте.
+            # только для чтения, чтобы параметры запуска было видно в одном месте.
             "readonly": _readonly_settings(ctx),
         }
     )
@@ -1152,17 +1195,8 @@ async def _refresh_runtime_settings(ctx: AppContext) -> None:
     # транскодов читаются из него в момент запроса.
     await apply_runtime_settings(ctx)
 
-    overrides = await ctx.settings_repo.all_overrides()
-    interval = int(overrides.get("scan_interval_sec", ctx.settings.scan_interval_sec) or 0)
-    watch = bool(overrides.get("watch_enabled", ctx.settings.watch_enabled))
-    if ctx.watcher is not None:
-        ctx.watcher.set_interval(interval)
-        # Наблюдатель создаётся всегда, но фоновые задачи до этого могли не
-        # стартовать (при первом запуске оба параметра были выключены).
-        if watch or interval > 0:
-            await ctx.watcher.start()
-        else:
-            await ctx.watcher.stop()
+    # Наблюдатель и фаза обложек живут в worker-процессе: сообщаем ему, что настройки изменились.
+    await enqueue(ctx.music_db, "reload")
 
 
 # ----------------------------------------------------------------------
@@ -1189,14 +1223,22 @@ async def get_prefs(
 # ----------------------------------------------------------------------
 # Импорт плейлистов из папки
 # ----------------------------------------------------------------------
+def _import_item(path: str, name: str):
+    """Элемент прогресса импорта: состояние одного плейлиста."""
+    from app.playlists.import_jobs import ImportItem
+
+    return ImportItem(path=path, name=name)
+
+
 async def _build_plans(
-    ctx: AppContext, *, dir_override: str | None = None
+    ctx: AppContext, *, dir_override: str | None = None, job=None
 ) -> tuple[list, list[str], dict]:
     """Общий разбор для превью и применения.
 
     Возвращает (планы, предупреждения, параметры). Ничего не пишет в БД.
     """
     from app.playlists import importer
+    from app.playlists.matching import TrackIndex
 
     settings = await ctx.settings_repo.effective()
     raw_dir = (dir_override if dir_override is not None
@@ -1211,17 +1253,41 @@ async def _build_plans(
 
     files, warnings = importer.find_playlist_files(search_root)
 
+    # Обход закончен: теперь известно, сколько плейлистов разбирать.
+    # Дальше идём строго по одному — следующий после предыдущего.
+    if job is not None:
+        job.total = len(files)
+        job.stage = "playlists"
+        job.items = [
+            _import_item(str(path), importer.playlist_name(path)) for path in files
+        ]
+
+    # Один индекс на весь импорт: сравнение идёт в памяти.
+    track_index = TrackIndex.build(await ctx.tracks.all_live_for_index())
+
     plans = []
-    for file_path in files:
+    for file_no, file_path in enumerate(files):
         plan = importer.PlaylistPlan(
             path=str(file_path), name=importer.playlist_name(file_path)
         )
+        if job is not None:
+            job.current = plan.name
+            job.items[file_no].state = "parsing"
         entries, error = importer.read_playlist(file_path, music_root)
         if error:
             plan.error = error
             plans.append(plan)
+            if job is not None:
+                job.items[file_no].state = "error"
+                job.items[file_no].error = error
+                job.done = file_no + 1
             continue
         plan.total = len(entries)
+        if job is not None:
+            job.items[file_no].state = "matching"
+            job.items[file_no].total = len(entries)
+        # Индекс строится один раз на весь импорт: сравнение по базовому
+        # названию и нормализованному имени файла идёт в памяти.
         matched, unmatched = await importer.match_entries(
             entries,
             music_root=music_root,
@@ -1230,10 +1296,15 @@ async def _build_plans(
             find_by_title=ctx.tracks.find_by_title,
             prefix_from=prefix_from,
             prefix_to=prefix_to,
+            index=track_index,
         )
         plan.resolutions = matched
         plan.unmatched = unmatched
         plans.append(plan)
+        if job is not None:
+            job.items[file_no].state = "done"
+            job.items[file_no].matched = plan.matched_count
+            job.done = file_no + 1
 
     plans, name_warnings = _dedupe_plans(plans)
     warnings.extend(name_warnings)
@@ -1312,6 +1383,58 @@ async def check_playlists_dir(
                 "message": f"Найдено плейлистов: {len(files)}"})
 
 
+# Фоновые задачи импорта m3u. Разбор папки на большой библиотеке идёт минутами,
+# поэтому он вынесен в задачу: интерфейс опрашивает прогресс, а не ждёт ответа.
+IMPORT_JOBS = ImportJobs()
+# Ссылки на задачи держим: иначе asyncio может собрать их раньше времени.
+_IMPORT_TASKS: set[asyncio.Task] = set()
+
+
+@router.post("/playlists/import/start")
+async def start_playlist_import(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(csrf_protected),
+) -> JSONResponse:
+    """Запускает разбор папки в фоне и сразу отдаёт id задачи.
+
+    Дальше интерфейс опрашивает GET /playlists/import/jobs/{id}: там общий этап
+    и состояние каждого плейлиста. Ничего не пишет в БД.
+    """
+    body = await _json_body(request)
+    dir_override = body.get("dir")
+
+    job = IMPORT_JOBS.new()
+
+    async def runner() -> None:
+        await run_import(
+            job,
+            build_plans=lambda *, dir_override, job: _build_plans(
+                ctx, dir_override=dir_override, job=job
+            ),
+            dir_override=dir_override,
+            visible_playlists=lambda: ctx.playlists.list_visible(session.user.id),
+        )
+
+    task = asyncio.create_task(runner(), name=f"import-{job.id}")
+    _IMPORT_TASKS.add(task)
+    task.add_done_callback(_IMPORT_TASKS.discard)
+    return _ok(job.as_dict(), status_code=202)
+
+
+@router.get("/playlists/import/jobs/{job_id}")
+async def playlist_import_progress(
+    job_id: str,
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(current_session),
+) -> JSONResponse:
+    """Прогресс импорта: общий этап и состояние каждого плейлиста."""
+    job = IMPORT_JOBS.get(job_id)
+    if job is None:
+        return _fail("Задача импорта не найдена или устарела. Запустите импорт заново.", 404)
+    return _ok(job.as_dict())
+
+
 @router.get("/playlists/import/preview")
 async def preview_playlist_import(
     request: Request,
@@ -1377,12 +1500,19 @@ async def apply_playlist_import(
     if not isinstance(items, list) or not items:
         return _fail("Ожидался список items")
 
-    try:
-        plans, _warnings, _params = await _build_plans(
-            ctx, dir_override=body.get("dir")
-        )
-    except importer.ImportError_ as exc:
-        return _fail(str(exc))
+    # Планы берём из задачи импорта, если интерфейс её передал: повторный разбор
+    # папки на большой библиотеке — это ещё раз те же минуты ожидания.
+    job_id = str(body.get("job_id") or "")
+    job = IMPORT_JOBS.get(job_id) if job_id else None
+    if job is not None and job.plans:
+        plans = job.plans
+    else:
+        try:
+            plans, _warnings, _params = await _build_plans(
+                ctx, dir_override=body.get("dir")
+            )
+        except importer.ImportError_ as exc:
+            return _fail(str(exc))
 
     plan_by_path = {plan.path: plan for plan in plans}
     results: list[dict] = []

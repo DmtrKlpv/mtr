@@ -194,8 +194,24 @@ function renderResyncPlan(container, plan, token, playlistId) {
     el('h4', {}, 'Новые файлы в папке'), addList,
     el('h4', {}, 'Удаление'), removeBlock,
     plan.ambiguous.length
-      ? el('p', { class: 'muted small' },
-          `Неоднозначные совпадения не изменены: ${plan.ambiguous.map((a) => a.title).join(', ')}`)
+      ? el('div', {},
+          el('p', { class: 'muted small' },
+            `Похожие, но не изменённые: ${plan.ambiguous.length}. `
+            + 'Выберите трек вручную в плейлисте, если совпадение верное.'),
+          // Причина важна: «по названию без feat» и «по имени файла» — разные
+          // сигналы, и пользователь должен видеть, на чём основан вариант.
+          el('div', { class: 'list' },
+            ...plan.ambiguous.slice(0, 20).map((item) => el('div', { class: 'row' },
+              el('div', { class: 'track-main' },
+                el('span', { class: 'small ellipsis' }, item.title || item.old_path),
+                el('span', { class: 'muted tiny ellipsis' },
+                  (item.candidates || [])
+                    .map((c) => `${c.artist || '?'} — ${c.title}${c.note ? ` (${c.note})` : ''}`)
+                    .join(' · ') || 'вариантов нет'),
+              ),
+            )),
+          ),
+        )
       : null,
     el('div', { class: 'row' }, applyButton),
   );

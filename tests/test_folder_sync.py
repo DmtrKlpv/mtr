@@ -230,7 +230,7 @@ async def test_music_migration_v4_upgrades_v3_database(tmp_path):
     from app.db.database import Database
     from app.db.migrations import MUSIC_SCHEMA_VERSION, _migrate_music, _read_schema
 
-    assert MUSIC_SCHEMA_VERSION == 4
+    assert MUSIC_SCHEMA_VERSION == 6
     db = Database(tmp_path / "old.db", label="music")
     await db.connect()
     try:
@@ -239,7 +239,7 @@ async def test_music_migration_v4_upgrades_v3_database(tmp_path):
         await db.set_user_version(3)
 
         await _migrate_music(db)
-        assert await db.get_user_version() == 4
+        assert await db.get_user_version() == 6
 
         cols = {r["name"] for r in await db.fetch_all("PRAGMA table_info(playlists)")}
         assert {"origin_folder_path", "synced_at"} <= cols
@@ -250,7 +250,7 @@ async def test_music_migration_v4_upgrades_v3_database(tmp_path):
 
         # Повторный запуск ничего не ломает (ALTER не выполняется дважды).
         await _migrate_music(db)
-        assert await db.get_user_version() == 4
+        assert await db.get_user_version() == 6
     finally:
         await db.close()
 

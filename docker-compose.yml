@@ -18,16 +18,40 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mtr-app:0.20.1
+    image: mtr-app:0.24.2
     container_name: mtr-app
     restart: unless-stopped
+    # Ротация логов: без лимита json-file растёт бесконечно и держит диск в работе.
+    # Максимум ~30 МБ на контейнер (3 файла по 10 МБ), старые записи удаляются.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "4533:4533"
     volumes:
-      # Библиотека. Только чтение: сервер в музыку не пишет.
+      # Библиотека. Только чтение (:ro): сервер в музыку не пишет.
       - /share/CACHEDEV1_DATA/Multimedia/Music:/music:ro
       # Состояние: обе базы, ключ шифрования, кэш обложек.
       - /share/CACHEDEV1_DATA/Container/mtr-data:/data
+      #
+      # Другие варианты путей (раскомментируйте нужную пару и закомментируйте верхнюю):
+      #
+      #   Docker Desktop на Windows:
+      #   - D:/music_temp:/music:ro
+      #   - D:/data:/data
+      #
+      #   Linux/NAS:
+      #   - /mnt/music:/music:ro
+      #   - /mnt/mtr-data:/data
+      #
+      #   Synology (стандартный том):
+      #   - /volume1/music:/music:ro
+      #   - /volume1/docker/mtr-data:/data
+      #
+      # Важно: путь слева — на хосте (до двоеточия), справа — внутри контейнера.
+      # Менять /music и /data внутри контейнера не нужно.
     # Ключ шифрования создаётся автоматически в /data/secret.key и переживает
     # пересоздание контейнера. Задавать его вручную не нужно и не рекомендуется:
     # смена ключа делает сохранённые пароли нечитаемыми.

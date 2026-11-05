@@ -1,18 +1,11 @@
 # =====================================================================
 # MTR Music Server
 #
-# Собирается под linux/amd64, linux/arm64 и linux/arm/v7.
+# Собирается под linux/amd64 и linux/arm64.
 #
-# Сборка под arm/v7 идёт через QEMU-эмуляцию и потому медленная
-# (apt-get ffmpeg занимает ~9 минут). Это нормально, не зависание.
-#
-# Колёса под armv7l для cffi, uvloop, httptools и pyyaml есть только
-# на piwheels — он подключён как extra-index-url. PyPI остаётся
-# основным индексом, piwheels добирает недостающее.
-#
-# --only-binary=:all: обязателен: без него pip молча пробует собрать
-# пакет из исходников и падает на отсутствии gcc через полчаса
-# эмуляции. С ним падение происходит сразу и с понятным текстом.
+# Зависимости ставятся колёсами (--only-binary=:all:): без этого pip молча
+# пробует собрать пакет из исходников и падает на отсутствии gcc. С флагом
+# падение происходит сразу и с понятным текстом.
 # =====================================================================
 FROM python:3.13-slim
 
@@ -26,8 +19,8 @@ ENV PYTHONUNBUFFERED=1 \
     MTR_LOG_LEVEL=INFO
 
 # ffmpeg нужен аудиоядру. Один слой с очисткой apt-списков.
-# libwebp*: колёса armv7 (piwheels) линкуются динамически к системным libwebp.so.7 и другим.
-# Без них PIL._webp не импортируется, и Pillow пишет ?WEBP support not installed?.
+# libwebp*: нужны для декодера WebP в Pillow. Без них PIL._webp не импортируется,
+# и Pillow пишет «WEBP support not installed» — обложки WebP не уменьшаются.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
         libwebp7 libwebpmux3 libwebpdemux2 \
@@ -45,6 +38,12 @@ RUN pip install --no-cache-dir --only-binary=:all: \
 # --chown копирует сразу с нужным владельцем, без отдельного chown -R
 # (он бы создал лишний слой, дублирующий весь код в образе).
 COPY --chown=1000:1000 app ./app
+
+# Проверка на этапе сборки: если пакет не попал в образ, сборка падает здесь,
+# а не при запуске контейнера. Без этого ошибка «No module named app.db»
+# видна только в журнале uvicorn, уже после старта.
+RUN test -f app/db/database.py && python -c "import app.db.database, app.bootstrap" \
+ && echo "образ: пакет app собран корректно"
 
 # Скрипты обслуживания (самопроверка образа). Нужны внутри контейнера:
 # docker exec mtr-app sh /app/scripts/selfcheck.sh
@@ -67,5 +66,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 # --loop auto и --http auto оставлены намеренно: uvicorn сам выберет
 # uvloop/httptools там, где они установлены, и откатится на asyncio/h11
-# там, где их нет (arm/v7).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4533", "--loop", "auto", "--http", "auto"]
+# там, где их нет.
+# --no-access-log: uvicorn иначе пишет строку на каждый HTTP-запрос, включая
+# проверку /healthz каждые 30 с и ping клиентов. Это основной постоянный поток
+# записи в docker logs. Ошибки и предупреждения приложения пишутся как раньше.
+# Чтобы снова видеть запросы, уберите флаг.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4533", "--loop", "auto", "--http", "auto", "--no-access-log"]

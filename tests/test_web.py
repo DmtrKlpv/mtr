@@ -363,20 +363,29 @@ async def test_server_info_for_admin(web):
 
 
 async def test_scan_endpoint(web):
-    client, _ = web
+    """Скан ставится в очередь worker-процесса; здесь worker имитируется вручную."""
+    from app.worker import ipc
+    from app.worker.runtime import WorkerRuntime
+
+    client, app = web
     csrf = await login_admin(client)
+    ctx = app.state.ctx
+    # Worker «жив»: свежий heartbeat. Без него веб отвечает 503 (см. test_worker).
+    ipc.write_status(ipc.status_path(ctx.settings.data_dir), {"scan": {"status": "idle"}})
     response = await client.post(
         "/api/web/scan?mode=full", headers={"X-CSRF-Token": csrf}
     )
-    # Скан асинхронный: POST отвечает 202 сразу, результат — через /scan/status.
     assert response.status_code == 202
-    for _ in range(200):
-        status = (await client.get("/api/web/scan/status")).json()["data"]
-        if status["current"]["status"] != "running":
-            break
-        await asyncio.sleep(0.05)
+
+    runtime = WorkerRuntime(ctx, poll_sec=0.01)
+    assert await runtime.handle_commands() == 1
+    await runtime.wait_scan(timeout=60)
+    await runtime.publish_status()
+
+    status = (await client.get("/api/web/scan/status")).json()["data"]
     assert status["current"]["status"] == "completed"
     assert status["current"]["seen"] == 3
+    assert status["worker"]["alive"] is True
 
 
 # ----------------------------------------------------------------------

@@ -15,6 +15,8 @@ const state = {
   queueIndex: -1,
   shuffle: false,
   repeat: 'off',           // off | all | one
+  scanRunning: false,      // идёт скан: заглушки списков показывают это
+  scanPercent: 0,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -136,7 +138,24 @@ async function api(path, options = {}) {
   if (options.method && options.method !== 'GET') {
     headers['X-CSRF-Token'] = state.csrf;
   }
-  const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+  // «Failed to fetch» ничего не говорит пользователю и пугает на большой базе,
+  // где сервер может отвечать долго. Один повтор для GET и понятный текст ошибки.
+  const isGet = !options.method || options.method === 'GET';
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+  } catch (error) {
+    // Отмена запроса (AbortController) — не ошибка сети, её обрабатывает вызывающий код.
+    if (error && error.name === 'AbortError') throw error;
+    if (!isGet) throw new Error('Сервер не ответил. Проверьте, что контейнер запущен.');
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    try {
+      response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+    } catch (retryError) {
+      if (retryError && retryError.name === 'AbortError') throw retryError;
+      throw new Error('Сервер не ответил. Возможно, идёт сканирование — попробуйте ещё раз.');
+    }
+  }
   if (response.status === 401) {
     window.location.href = '/login';
     throw new Error('unauthorized');
@@ -154,6 +173,14 @@ async function api(path, options = {}) {
   // чтобы вызывающий код работал с полезной нагрузкой напрямую.
   if (body && typeof body === 'object' && 'ok' in body) return body.data;
   return body;
+}
+
+// Текст-заглушка на время запроса. Если идёт скан, честно пишем об этом:
+// пустое «Загрузка…» на большой библиотеке выглядит как зависание.
+function loadingNote(text = 'Загрузка…') {
+  const scanning = state.scanRunning;
+  return el('p', { class: 'muted' },
+    scanning ? `Загрузка / Идёт сканирование… ${state.scanPercent || 0}%` : text);
 }
 
 function toast(message, kind = 'info') {
@@ -189,51 +216,95 @@ function collageTiles(ids, key, count = 4) {
   return tiles;
 }
 
-function coverCollage(ids, key) {
-  const tiles = collageTiles(ids, key);
+// Плитки коллажа — обложки альбомов треков. Фоновая фаза кеширует обложки альбомов (al-),
+// а tr-ключей в кеше обычно нет, поэтому плитки по трекам никогда не загружались.
+function coverCollage(tracks, key) {
+  const albumIds = [...new Set((tracks || []).map((t) => t.album_id).filter(Boolean))];
+  const tiles = collageTiles(albumIds, key);
   if (!tiles.length) {
     return el('div', { class: 'collage' },
       el('img', { class: 'collage-tile', src: PLACEHOLDER, alt: '' }));
   }
   return el('div', { class: 'collage' },
-    ...tiles.map((id) => coverImg('tr', id, { className: 'collage-tile', alt: '' })));
+    ...tiles.map((id) => coverImg('al', id, { className: 'collage-tile', alt: '' })));
+}
+
+// Обложка одного трека в списке: обложка его альбома (кешируется фоном), иначе заглушка.
+function trackCoverNode(track, className) {
+  // Обложка трека = обложка его альбома: именно её кеширует фоновая фаза (al-<id>).
+  // Ключи tr-<id> в кеше не появляются, поэтому обложки треков раньше не загружались.
+  if (track.album_id) return coverImg('al', track.album_id, { className, alt: '' });
+  return el('img', { class: className, src: PLACEHOLDER, alt: '' });
+}
+
+// Хлебные крошки: путь «Библиотека / Альбомы / Альбом». Последний пункт — не ссылка.
+// Первая крошка с иконкой стрелки дублирует привычное «назад».
+function breadcrumbs(items) {
+  const nodes = [];
+  items.forEach((item, index) => {
+    if (index > 0) nodes.push(el('span', { class: 'sep' }, '/'));
+    if (item.current) {
+      nodes.push(el('span', { class: 'current' }, item.label));
+      return;
+    }
+    const isFirst = index === 0;
+    nodes.push(el('button', {
+      type: 'button',
+      class: isFirst ? 'breadcrumb-link crumb-back' : 'breadcrumb-link',
+      onclick: () => (item.action ? item.action() : setView(item.view)),
+    }, ...(isFirst ? [icon('arrow-left'), item.label] : [item.label])));
+  });
+  return el('nav', { class: 'breadcrumbs', 'aria-label': 'Путь' }, ...nodes);
+}
+
+// Переключение вкладки библиотеки из крошек.
+//
+// Раньше здесь был просто setView('library'): он перерисовывает главную целиком,
+// и список альбомов оказывался ниже приветствия и секций — выглядело как
+// «перешли на главную». Прокрутка не помогала. Теперь для альбомов есть
+// отдельный вид без главной (renderAlbumsView), остальные вкладки — как раньше.
+async function switchLibraryTab(kind) {
+  state.libraryView = kind;
+  await setView(kind === 'albums' ? 'albums' : 'library');
+}
+
+/* ---------- Список альбомов отдельным видом ----------
+
+   Крошка «Альбомы» вела на setView('library'), а это рисует главную целиком:
+   приветствие, поиск, «Недавно добавленное». Список оказывался ниже экрана,
+   и переход выглядел как возврат на главную. Здесь отдельный вид: крошки,
+   переключатель и сетка — больше ничего.
+*/
+async function renderAlbumsView(view) {
+  const switcher = librarySwitcher();
+  fill(view,
+    breadcrumbs([{ label: 'Библиотека', view: 'library' }, { label: 'Альбомы', current: true }]),
+    el('div', { class: 'section-head' }, el('h2', {}, 'Альбомы')),
+    switcher,
+    el('div', { id: 'library-body' }, loadingNote()),
+  );
+  await renderAlbumsInto($('#library-body'));
+}
+
+// Переключатель вкладок библиотеки. Общий для главной и вида «Альбомы».
+function librarySwitcher() {
+  return el('div', { class: 'segmented', role: 'tablist' },
+    ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
+      class: 'segment' + (state.libraryView === kind ? ' active' : ''),
+      role: 'tab',
+      'aria-selected': state.libraryView === kind ? 'true' : 'false',
+      onclick: () => {
+        state.libraryView = kind;
+        // Список альбомов — отдельным видом; остальные вкладки остаются на главной.
+        setView(kind === 'albums' ? 'albums' : 'library');
+      },
+    }, { artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты' }[kind])),
+  );
 }
 
 function coverUrl(kind, id) {
   return `/rest/getCoverArt?id=${kind}-${id}`;
 }
-
-// Обложки грузим только когда карточка подходит к экрану.
-//
-// <img loading="lazy"> экономит не всё: браузер всё равно начинает запрос
-// заранее и держит несколько соединений на хост. А каждый промах кеша на
-// сервере — это чтение файла и разбор тегов. Поэтому src выставляется
-// наблюдателем, а до этого в разметке стоит заглушка.
-const coverObserver = ('IntersectionObserver' in window)
-  ? new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        const node = entry.target;
-        // Обложка уже загружена — наблюдать больше не за чем.
-        if (node.loaded) {
-          coverObserver.unobserve(node);
-          return;
-        }
-        // Карточку удалили из DOM — больше не нужна ни ей, ни наблюдателю.
-        if (!node.isConnected) {
-          coverObserver.unobserve(node);
-          coverQueue.cancel(node);
-          return;
-        }
-        if (entry.isIntersecting) {
-          const url = node.dataset.coverSrc;
-          if (url) coverQueue.enqueue(node, url);
-        } else {
-          // Ушла с экрана: если ещё не грузилась — снимаем из очереди.
-          coverQueue.cancel(node);
-        }
-      });
-    }, { rootMargin: '300px 0px' })
-  : null;
 
 function coverImg(kind, id, { className = '', alt = '' } = {}) {
   // onerror подставляет заглушку: у части альбомов картинки просто нет,
@@ -250,15 +321,88 @@ function coverImg(kind, id, { className = '', alt = '' } = {}) {
       target.src = PLACEHOLDER;
     },
   });
-  const url = coverUrl(kind, id);
-  if (coverObserver) {
-    node.dataset.coverSrc = url;
-    coverObserver.observe(node);
-  } else {
-    coverQueue.enqueue(node, url);
-  }
+  // Обложку не запрашиваем сами: карточка ждёт, пока пакетная проверка
+  // готовности (coverReady) скажет, что обложка уже лежит в кеше.
+  node.dataset.coverKey = `${kind}-${id}`;
+  coverReady.track(node);
   return node;
 }
+
+/* ---------- Готовность обложек пачкой ----------
+
+   Списки (альбомы, исполнители, плейлисты) рисуются сразу, с заглушками.
+   Карточка получает src только тогда, когда сервер сообщил, что обложка уже
+   в кеше. Запрос getCoverArt на промах кеша не уходит: извлечение из тегов
+   делает фоновая фаза на сервере, а не открытие списка.
+
+   * карточки собираются в пачку и проверяются одним запросом /covers/ready;
+   * «ready» — подставляем src, это уже готовое превью из кеша;
+   * «absent» — остаёмся на заглушке, повторно не спрашиваем;
+   * нет ответа (ключа нет в ответе) — проверим позже, когда фаза дойдёт;
+   * пауза, пока идёт скан: сервер в это время занят, опрос не нужен.
+*/
+const coverReady = (() => {
+  const BATCH = 60;          // ключей в одном запросе
+  const INTERVAL_MS = 1500;  // как часто проверяем ожидающие карточки
+  const nodes = new Map();   // key -> Set(node)
+  const absent = new Set();  // ключи, для которых обложки нет (не спрашиваем)
+  let timer = null;
+  let paused = false;
+
+  function track(node) {
+    const key = node.dataset.coverKey;
+    if (!key || absent.has(key)) return;
+    if (!nodes.has(key)) nodes.set(key, new Set());
+    nodes.get(key).add(node);
+    schedule();
+  }
+
+  function schedule() {
+    if (timer || paused || !nodes.size) return;
+    timer = setTimeout(run, INTERVAL_MS);
+  }
+
+  function apply(key, status) {
+    const set = nodes.get(key);
+    if (!set) return;
+    if (status === 'ready') {
+      set.forEach((node) => {
+        if (!node.isConnected) return;
+        node.src = `/rest/getCoverArt?id=${key}`;
+      });
+      nodes.delete(key);
+    } else if (status === 'absent') {
+      absent.add(key);
+      nodes.delete(key);
+    }
+  }
+
+  async function run() {
+    timer = null;
+    if (paused) return;
+    // Убираем из ожидания карточки, которые уже ушли из DOM.
+    for (const [key, set] of nodes) {
+      for (const node of set) if (!node.isConnected) set.delete(node);
+      if (!set.size) nodes.delete(key);
+    }
+    const keys = [...nodes.keys()].slice(0, BATCH);
+    if (keys.length) {
+      try {
+        const data = await api(`/api/web/covers/ready?keys=${encodeURIComponent(keys.join(','))}`);
+        const ready = data.ready || {};
+        keys.forEach((key) => { if (ready[key]) apply(key, ready[key]); });
+      } catch (error) {
+        // Сеть или сервер занят: попробуем на следующем тике.
+      }
+    }
+    schedule();
+  }
+
+  function pause() { paused = true; if (timer) { clearTimeout(timer); timer = null; } }
+  function resume() { if (!paused) return; paused = false; schedule(); }
+
+  return { track, pause, resume, pending: () => nodes.size };
+})();
 
 /* ---------- Навигация ---------- */
 function setView(name) {
@@ -280,9 +424,10 @@ function setView(name) {
   // scan_import.js грузится после app.js, поэтому проверяем наличие функции.
   if (typeof stopHomeScan === 'function') stopHomeScan();
   const view = $('#view');
-  view.replaceChildren(el('p', { class: 'muted' }, 'Загрузка…'));
+  view.replaceChildren(loadingNote());
   const loaders = {
     library: renderLibrary,
+    albums: renderAlbumsView,
     playlists: renderPlaylists,
     starred: renderStarred,
     recent: renderRecent,
@@ -327,56 +472,113 @@ async function renderLibrary(view) {
 
   const trackList = el('div', { class: 'list' });
 
+  // Поиск с отменой предыдущего запроса.
+  //
+  // Сервер больше не тормозит (агрегаты считаются один раз), но запросов всё равно
+  // много: по одному на паузу в наборе. Без отмены они копились в очереди, и сервер
+  // выглядел зависшим. Теперь каждый новый ввод отменяет предыдущий.
+  let searchController = null;
+  let searchSeq = 0;
+
+  const renderSearchResults = (results) => {
+    const tracks = results.tracks || [];
+    const albums = results.albums || [];
+    const artists = results.artists || [];
+    if (!tracks.length && !albums.length && !artists.length) {
+      trackList.replaceChildren(el('p', { class: 'muted' }, 'Ничего не найдено'));
+      return;
+    }
+    const blocks = [];
+    if (tracks.length) {
+      blocks.push(
+        el('div', { class: 'row' },
+          el('span', { class: 'muted small' }, `Треков: ${tracks.length}`),
+          el('button', {
+            class: 'ghost small',
+            onclick: () => { enqueue(tracks); playIndex(0); },
+          }, 'Играть все'),
+        ),
+        ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 })),
+      );
+    }
+    if (albums.length) {
+      blocks.push(
+        el('h3', {}, `Альбомы (${albums.length})`),
+        el('div', { class: 'album-grid' },
+          ...albums.map((album) => el('button',
+            { class: 'album', onclick: () => openAlbum(album.id) },
+            coverImg('al', album.id, { className: 'album-cover' }),
+            el('span', { class: 'album-name' }, album.name),
+            el('span', { class: 'muted small' }, album.artist || ''),
+          )),
+        ),
+      );
+    }
+    if (artists.length) {
+      blocks.push(
+        el('h3', {}, `Исполнители (${artists.length})`),
+        el('div', { class: 'row wrap' },
+          ...artists.map((artist) => el('button', {
+            class: 'ghost small',
+            onclick: () => openArtist(artist.id),
+          }, artist.name)),
+        ),
+      );
+    }
+    trackList.replaceChildren(...blocks);
+  };
+
   const search = el('input', {
     type: 'search',
     placeholder: 'Поиск по трекам, альбомам, исполнителям…',
     class: 'search',
     'aria-label': 'Поиск',
     oninput: debounce(async (event) => {
+      // Поле могли перерисовать: сверяемся с текущим значением, а не с event.
       const query = event.target.value.trim();
-      if (!query) { trackList.replaceChildren(); return; }
-      const results = await api(`/api/web/search?q=${encodeURIComponent(query)}`);
-      const tracks = results.tracks || [];
-      trackList.replaceChildren(
-        tracks.length
-          ? el('div', { class: 'row' },
-              el('span', { class: 'muted small' }, `Найдено: ${tracks.length}`),
-              el('button', {
-                class: 'ghost small',
-                onclick: () => { enqueue(tracks); playIndex(0); },
-              }, 'Играть все'),
-            )
-          : el('p', { class: 'muted' }, 'Ничего не найдено'),
-        ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 })),
-      );
+      if (searchController) {
+        searchController.abort();
+        searchController = null;
+      }
+      if (!query) {
+        trackList.replaceChildren();
+        return;
+      }
+      const seq = ++searchSeq;
+      const controller = new AbortController();
+      searchController = controller;
+      trackList.replaceChildren(el('p', { class: 'muted' }, 'Поиск…'));
+      try {
+        const results = await api(
+          `/api/web/search?q=${encodeURIComponent(query)}`,
+          { signal: controller.signal },
+        );
+        if (seq !== searchSeq) return;   // ответ устарел: пришёл после нового ввода
+        renderSearchResults(results);
+      } catch (error) {
+        if (error && error.name === 'AbortError') return;
+        if (seq !== searchSeq) return;
+        trackList.replaceChildren(el('p', { class: 'error' }, error.message));
+      }
     }, 300),
   });
 
   const summary = el('div', { class: 'cards' });
-  const switcher = el('div', { class: 'segmented', role: 'tablist' },
-    ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
-      class: 'segment' + (state.libraryView === kind ? ' active' : ''),
-      role: 'tab',
-      'aria-selected': state.libraryView === kind ? 'true' : 'false',
-      onclick: () => {
-        state.libraryView = kind;
-        setView('library');
-      },
-    }, { artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты' }[kind])),
-  );
+  const switcher = librarySwitcher();
 
   // Каркас рисуем сразу. Раньше экран ждал /stats и только потом появлялся —
   // на большой библиотеке это и выглядело как зависшее «Загрузка…».
   view.replaceChildren(
     el('h1', { class: 'greeting' }, `Привет, ${state.user}!`),
-    el('div', { class: 'row' }, search, rescanButton()),
+    // Кнопки сканирования живут в разделе «Сканирование»: на главной их больше нет.
+    el('div', { class: 'row' }, search),
     homeActivityBox(),
     trackList,
     summary,
     el('div', { id: 'home-sections' }),
     el('div', { class: 'section-head' }, el('h2', {}, 'Библиотека')),
     switcher,
-    el('div', { id: 'library-body' }, el('p', { class: 'muted' }, 'Загрузка…')),
+    el('div', { id: 'library-body' }, loadingNote()),
   );
 
   // Дальше три независимых запроса: каждый заполняет свою часть по готовности.
@@ -402,7 +604,6 @@ async function loadStats(node) {
     card('Треков', stats.tracks ?? 0),
     card('Альбомов', stats.albums ?? 0),
     card('Исполнителей', stats.artists ?? 0),
-    card('Пользователей', stats.users ?? 0),
   );
 }
 
@@ -441,7 +642,7 @@ function artistAvatar(artist) {
 const PAGE_SIZE = 60;
 
 async function renderAlbumsInto(node) {
-  fill(node, el('p', { class: 'muted' }, 'Загрузка…'));
+  fill(node, loadingNote());
 
   let offset = 0;
   let total = 0;
@@ -494,7 +695,7 @@ async function renderAlbumsInto(node) {
 }
 
 async function renderArtistsInto(node) {
-  fill(node, el('p', { class: 'muted' }, 'Загрузка…'));
+  fill(node, loadingNote());
 
   let offset = 0;
   let total = 0;
@@ -532,7 +733,10 @@ async function renderArtistsInto(node) {
     },
       artistAvatar(artist),
       el('span', { class: 'artist-name' }, artist.name),
-      el('span', { class: 'artist-meta' }, `${artist.album_count} альб.`),
+      // Исполнитель без альбома (только треки, например гость или одиночный трек):
+      // подпись «N тр.» вместо «0 альб.», чтобы не выглядело как пустая плитка.
+      el('span', { class: 'artist-meta' },
+        artist.album_count ? `${artist.album_count} альб.` : `${artist.track_count ?? 0} тр.`),
     )));
 
     const shown = grid.childElementCount;
@@ -551,7 +755,11 @@ async function openArtist(artistId) {
   const artist = await api(`/api/web/artists/${artistId}`);
   const albums = artist.albums || [];
   $('#view').replaceChildren(
-    el('button', { class: 'ghost with-icon', onclick: () => setView('library') }, icon('arrow-left'), 'Библиотека'),
+    breadcrumbs([
+      { label: 'Библиотека', view: 'library' },
+      { label: 'Исполнители', action: () => switchLibraryTab('artists') },
+      { label: artist.name, current: true },
+    ]),
     el('h2', {}, artist.name),
     el('p', { class: 'muted' }, `${albums.length} альбомов`),
     el('div', { class: 'album-grid' },
@@ -563,28 +771,6 @@ async function openArtist(artistId) {
       )),
     ),
   );
-}
-
-function rescanButton() {
-  if (state.role !== 'admin') return el('span', { hidden: true });
-  return el('button', {
-    class: 'primary',
-    onclick: async (event) => {
-      const button = event.target;
-      button.disabled = true;
-      button.textContent = 'Сканирую…';
-      try {
-        await api('/api/web/scan', { method: 'POST' });
-        toast('Сканирование запущено', 'ok');
-        setView('library');   // панель прогресса появится на главной
-      } catch (error) {
-        toast(error.message, 'error');
-      } finally {
-        button.disabled = false;
-        button.textContent = 'Пересканировать';
-      }
-    },
-  }, 'Пересканировать');
 }
 
 async function openAlbum(albumId) {
@@ -600,7 +786,15 @@ async function openAlbum(albumId) {
     ),
     el('div', { class: 'album-hero-info' },
       el('h1', { class: 'album-hero-title' }, album.name),
-      el('p', { class: 'album-hero-artist' }, album.artist || ''),
+      el('p', { class: 'album-hero-artist' },
+        album.artist_id
+          ? el('a', {
+              class: 'artist-plain-link',
+              href: '#',
+              title: 'Все альбомы исполнителя',
+              onclick: (event) => { event.preventDefault(); openArtist(album.artist_id); },
+            }, album.artist || '')
+          : (album.artist || '')),
       el('p', { class: 'muted small' },
         [album.year || null, `${tracks.length} треков`, formatTime(total)]
           .filter(Boolean).join(' · ')),
@@ -625,8 +819,11 @@ async function openAlbum(albumId) {
   );
 
   fill($('#view'),
-    el('button', { class: 'ghost with-icon', onclick: () => setView('library') },
-      icon('arrow-left'), 'Библиотека'),
+    breadcrumbs([
+      { label: 'Библиотека', view: 'library' },
+      { label: 'Альбомы', action: () => switchLibraryTab('albums') },
+      { label: album.name, current: true },
+    ]),
     hero,
     el('div', { class: 'list' },
       ...tracks.map((track, i) => trackRow(track, { queue, index: i + 1 }))),
@@ -825,7 +1022,7 @@ function trackRow(track, context = {}) {
     // Номер — позиция в текущем списке, а не номер альбома: в плейлисте
     // и избранном нумерация альбома сбивала бы с толку.
     el('span', { class: 'track-index' }, context.index ? String(context.index) : ''),
-    coverImg('tr', track.id, { className: 'track-cover', alt: '' }),
+    trackCoverNode(track, 'track-cover'),
     el('div', { class: 'track-main' },
       el('strong', { class: 'ellipsis' }, track.title),
       el('span', { class: 'muted small ellipsis' },
@@ -1092,8 +1289,7 @@ async function renderPlaylists(view) {
     const playlist = await renderPlaylistDetailInto(detail, selectedPlaylistId);
     const art = $('#pl-art');
     if (playlist && art) {
-      const ids = (playlist.tracks || []).map((track) => track.id);
-      fill(art, coverCollage(ids, `pl-${selectedPlaylistId}`));
+      fill(art, coverCollage(playlist.tracks || [], `pl-${selectedPlaylistId}`));
     }
   }
 }
@@ -1202,7 +1398,7 @@ async function renderStarred(view) {
   // обложек избранного, справа название и кнопки. Треки — ниже.
   const hero = el('div', { class: 'album-hero' },
     el('div', { class: 'album-hero-left' },
-      coverCollage(queue.map((track) => track.id), 'starred'),
+      coverCollage(queue, 'starred'),
     ),
     el('div', { class: 'album-hero-info' },
       el('h1', { class: 'album-hero-title' }, 'Избранное'),
@@ -1299,12 +1495,12 @@ async function renderSettings(view) {
     },
   }, 'Сохранить') : null;
 
-  // Параметры запуска из .env: только чтение, но всё видно в одном месте.
+  // Параметры запуска из docker-compose.yml: только чтение, видны здесь для проверки.
   const readonly = (data.readonly || []).map((item) => el('div', { class: 'setting' },
     el('div', { class: 'setting-text' },
       el('strong', {}, item.label),
       el('span', { class: 'muted small' }, item.help),
-      el('span', { class: 'badge' }, 'только .env'),
+      el('span', { class: 'badge' }, 'docker-compose.yml'),
     ),
     el('div', { class: 'setting-control' },
       el('span', { class: 'mono small break' }, String(item.value))),
@@ -1320,7 +1516,7 @@ async function renderSettings(view) {
     el('div', { class: 'row' }, saveButton),
     el('h3', {}, 'Параметры запуска'),
     el('p', { class: 'muted small' },
-      'Задаются в .env и docker-compose. Меняются только перезапуском контейнера.'),
+      'Задаются в docker-compose.yml. Меняются только перезапуском контейнера.'),
     el('div', { class: 'settings' }, ...readonly),
   );
 }
@@ -1455,6 +1651,8 @@ async function renderServer(view) {
     ['Обложек в кэше', `${info.covers.count} (${formatBytes(info.covers.total_bytes)})`],
     ['Треков', info.tracks],
     ['Отсутствующих', info.missing],
+    // Раньше это была плашка на главной; теперь строка здесь, рядом с остальными цифрами.
+    ['Пользователей', info.users ?? 0],
   ];
 
   view.replaceChildren(
@@ -1463,19 +1661,8 @@ async function renderServer(view) {
       el('span', { class: 'muted' }, key),
       el('span', { class: 'mono break' }, String(value)),
     ])),
-    el('div', { class: 'row wrap' }, rescanButton(),
-      el('button', {
-        class: 'ghost danger',
-        onclick: async () => {
-          const ok = await confirmDialog(
-            'Файлы обложек будут удалены и созданы заново при следующем запросе.',
-            { title: 'Очистить кэш обложек?', okLabel: 'Очистить' });
-          if (!ok) return;
-          await api('/api/web/covers/purge', { method: 'POST' });
-          toast('Кэш обложек очищен', 'ok');
-          setView('server');
-        },
-      }, 'Очистить кэш обложек')),
+    // Работа с обложками живёт в разделе «Сканирование»: там же, где сам скан.
+    // Здесь дублировать кнопки не нужно.
   );
 }
 

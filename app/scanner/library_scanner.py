@@ -28,7 +28,6 @@ from typing import Final
 from app.repositories.tracks import (
     ScanCounters,
     TrackRepository,
-    UpsertOutcome,
 )
 from app.scanner.tag_parser import is_supported_audio, parse_track
 
@@ -48,6 +47,8 @@ SKIP_DIR_NAMES: Final[frozenset[str]] = frozenset(
 PARSE_CONCURRENCY = 4
 # Размер батча для периодического прогресса.
 PROGRESS_EVERY = 25
+# Файлов в одной транзакции записи. Меньше — чаще commit (медленнее, но короче блокировка).
+SCAN_BATCH = 100
 # Сколько ошибок отдавать в ответе на запуск скана (в историю пишется больше).
 MAX_API_ERRORS = 20
 
@@ -104,6 +105,8 @@ class Scanner:
         # Меняется из настроек: на слабом CPU меньше параллельных чтений даёт
         # более ровную нагрузку, чем дефолтные 4.
         self._parse_concurrency = max(1, int(parse_concurrency))
+        # 0 — обрабатывать все файлы одним заходом (прежнее поведение).
+        self._batch_size = 0
 
     # ------------------------------------------------------------------
     # Публичное API
@@ -111,6 +114,15 @@ class Scanner:
     def cancel(self) -> None:
         """Просит текущий проход остановиться после текущего файла."""
         self._cancelled = True
+
+    def set_batch_size(self, value: int) -> None:
+        """Сколько треков брать за один заход (0 — все сразу).
+
+        Заходы идут строго последовательно: следующий начинается после записи
+        предыдущего. На большой библиотеке маленькие заходы дают ровный прогресс
+        и короткие блокировки БД.
+        """
+        self._batch_size = max(0, int(value))
 
     def set_parse_concurrency(self, value: int) -> None:
         """Меняет число одновременных чтений тегов (со страницы настроек)."""
@@ -341,66 +353,85 @@ class Scanner:
     async def _parse_batch(
         self, paths: list[str], counters: ScanCounters, run_id: int
     ) -> None:
-        """Разбирает файлы с ограниченной параллельностью."""
+        """Разбирает файлы пачками; запись каждой пачки — одной транзакцией.
+
+        Разбор идёт параллельно (семафор), запись — по одному файлу внутри общей
+        транзакции пачки. Каждый файл записывается под своим SAVEPOINT (его даёт
+        upsert_from_metadata при вложенной транзакции): ошибка одного файла откатывает
+        только его, остальные пачки не теряются. Раньше на каждый трек был свой commit.
+        """
         semaphore = asyncio.Semaphore(self._parse_concurrency)
         total = len(paths)
         processed = 0
+        # Размер захода: из настроек (0 — все сразу, одним заходом).
+        step = self._batch_size if self._batch_size > 0 else max(total, 1)
 
-        async def handle_one(path: str) -> None:
-            nonlocal processed
+        for start in range(0, total, step):
             if self._cancelled:
-                return
-            async with semaphore:
-                outcome = await self._process_file(path, counters)
-            processed += 1
+                break
+            chunk = paths[start:start + step]
 
-            if processed % PROGRESS_EVERY == 0 or processed == total:
-                await self._emit(
-                    {
-                        "stage": "parsing",
-                        "run_id": run_id,
-                        "processed": processed,
-                        "total": total,
-                        "added": counters.added,
-                        "updated": counters.updated,
-                        "failed": counters.failed,
-                        # Последняя ошибка — чтобы панель показала причину,
-                        # не дожидаясь конца прохода.
-                        "last_error": (
-                            counters.errors[-1].as_dict()
-                            if counters.errors else None
-                        ),
-                    }
-                )
-            _ = outcome
+            async def parse_one(path: str):
+                async with semaphore:
+                    return path, await self._parse_file(path, counters)
 
-        await asyncio.gather(
-            *(handle_one(path) for path in paths), return_exceptions=True
+            parsed = await asyncio.gather(*(parse_one(p) for p in chunk))
+
+            async with self._repo.batch():
+                for path, meta in parsed:
+                    if meta is None:
+                        processed += 1
+                        continue
+                    await self._store_file(path, meta, counters)
+                    processed += 1
+                    if processed % PROGRESS_EVERY == 0 or processed == total:
+                        await self._emit_progress(run_id, processed, total, counters)
+
+            if processed == total or processed % PROGRESS_EVERY == 0:
+                await self._emit_progress(run_id, processed, total, counters)
+
+    async def _emit_progress(
+        self, run_id: int, processed: int, total: int, counters: ScanCounters
+    ) -> None:
+        await self._emit(
+            {
+                "stage": "parsing",
+                "run_id": run_id,
+                "processed": processed,
+                "total": total,
+                "added": counters.added,
+                "updated": counters.updated,
+                "failed": counters.failed,
+                # Последняя ошибка — чтобы панель показала причину,
+                # не дожидаясь конца прохода.
+                "last_error": (
+                    counters.errors[-1].as_dict() if counters.errors else None
+                ),
+            }
         )
 
-    async def _process_file(
-        self, path: str, counters: ScanCounters
-    ) -> UpsertOutcome | None:
-        """Разбор одного файла. Ошибка файла не прерывает скан."""
+    async def _parse_file(self, path: str, counters: ScanCounters):
+        """Чтение и разбор тегов одного файла (без записи в БД)."""
         try:
             meta = await asyncio.to_thread(parse_track, path)
         except Exception as exc:  # noqa: BLE001 - парсер не должен бросать, но
             counters.add_error(path, f"{type(exc).__name__}: {exc}")
             logger.warning("не удалось разобрать %s: %s", path, exc)
             return None
-
         if not meta.ok:
             counters.add_error(path, meta.error or "не удалось прочитать теги")
             logger.warning("пропущен файл %s: %s", path, meta.error)
             return None
+        return meta
 
+    async def _store_file(self, path: str, meta, counters: ScanCounters):
+        """Запись одного файла в текущей транзакции пачки. Ошибка — только этот файл."""
         try:
             outcome = await self._repo.upsert_from_metadata(meta)
         except Exception as exc:  # noqa: BLE001
             counters.add_error(path, f"запись в БД: {exc}")
             logger.exception("ошибка записи трека %s", path)
             return None
-
         if outcome.action == "added":
             counters.added += 1
         elif outcome.action == "updated":

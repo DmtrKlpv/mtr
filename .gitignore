@@ -1,5 +1,6 @@
 .env
-*.tar.gz
-*.tar
+
+mtr_v0.13.5_css_globe.tar.gz
+mtr.tar
 .idea
 /srceens/

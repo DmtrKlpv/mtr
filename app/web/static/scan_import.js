@@ -70,6 +70,40 @@ async function renderScan(view) {
     },
   }, label);
 
+  // Кнопки работы с обложками перенесены сюда из вкладки «Сервер»:
+  // всё, что относится к индексации, собрано в одном разделе.
+  const coversActions = el('div', { class: 'row wrap' },
+    el('button', {
+      class: 'ghost',
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          await api('/api/web/covers/warm', { method: 'POST' });
+          toast('Обложки поставлены в очередь', 'ok');
+          renderScan(view);
+        } catch (error) {
+          toast(error.message, 'error');
+          button.disabled = false;
+        }
+      },
+    }, 'Пересканировать обложки'),
+    el('button', {
+      class: 'ghost danger',
+      onclick: async () => {
+        const ok = await confirmDialog(
+          'Файлы обложек будут удалены и созданы заново при следующем запросе.',
+          { title: 'Очистить кэш обложек?', okLabel: 'Очистить' });
+        if (!ok) return;
+        try {
+          await api('/api/web/covers/purge', { method: 'POST' });
+          toast('Кэш обложек очищен', 'ok');
+          renderScan(view);
+        } catch (error) { toast(error.message, 'error'); }
+      },
+    }, 'Очистить кэш обложек'),
+  );
+
   actions.append(
     startButton('incremental', 'Сканировать (только изменения)', 'primary'),
     startButton('full', 'Полное сканирование', 'ghost'),
@@ -104,6 +138,7 @@ async function renderScan(view) {
     info,
     el('h3', {}, 'Обложки'),
     coversProgress(),
+    coversActions,
     liveErrors,
     actions,
     el('h3', {}, 'История'),
@@ -206,6 +241,9 @@ function updateCoversView(covers) {
 }
 
 function updateScanView(current) {
+  // Пауза очереди обложек, пока скан идёт (вызывается и на главной, и в разделе «Сканирование»).
+  if (current && current.status === 'running') coverReady.pause();
+  else if (current && current.status !== undefined) coverReady.resume();
   const fillNode = document.querySelector('#scan-fill');
   const infoNode = document.querySelector('#scan-info');
   const errorsNode = document.querySelector('#scan-errors');
@@ -216,14 +254,20 @@ function updateScanView(current) {
   fillNode.classList.toggle('running', current.status === 'running');
   fillNode.classList.toggle('failed', current.status === 'failed');
 
+  // Пока идёт скан, вместо голого процента пишем, что именно происходит:
+  // «Загрузка / Идёт сканирование… N%». Это видно только в разделе «Сканирование».
+  const running = current.status === 'running';
+  const stageText = current.stage === 'walk' ? 'Обход каталога' : 'Разбор тегов';
   const labels = {
     idle: 'Готов к запуску',
-    running: current.stage === 'walk' ? 'Обход каталога…' : 'Разбор тегов…',
+    running: `Загрузка / Идёт сканирование… ${percent}% · ${stageText}`,
     completed: 'Завершено',
     failed: 'Ошибка',
     cancelled: 'Отменено',
   };
-  const pieces = [`${labels[current.status] || current.status} — ${percent}%`];
+  const pieces = [
+    running ? labels.running : `${labels[current.status] || current.status} — ${percent}%`,
+  ];
   if (current.status === 'running' || current.to_parse) {
     pieces.push(`разобрано ${current.processed || 0} из ${current.to_parse || 0}`);
   }
@@ -286,9 +330,17 @@ function homeActivityBox() {
 
 function renderHomeActivity(data) {
   const box = document.querySelector('#home-activity');
-  if (!box) return;
   const scanning = Boolean(data.current && data.current.status === 'running');
+  // Заглушки списков («Загрузка / Идёт сканирование…») читают это состояние.
+  if (typeof state !== 'undefined' && state) {
+    state.scanRunning = scanning;
+    state.scanPercent = data.current ? Math.round(data.current.percent || 0) : 0;
+  }
+  if (!box) return;
   const covering = Boolean(data.covers && data.covers.state === 'running');
+  // Пока сервер занят сканом или фазой обложек, проверки готовности не шлём:
+  // они не нужны, а каждый запрос — лишняя работа рядом с индексацией.
+  if (scanning || covering) coverReady.pause(); else coverReady.resume();
   box.classList.toggle('hidden', !(scanning || covering));
   document.querySelector('#home-scan-block')?.classList.toggle('hidden', !scanning);
   document.querySelector('#home-covers-block')?.classList.toggle('hidden', !covering);
@@ -401,21 +453,101 @@ async function renderImport(view) {
     });
   };
 
+  // Импорт: разбор идёт фоновой задачей, интерфейс опрашивает прогресс.
+  //
+  // Раньше здесь был один синхронный запрос: пока шёл разбор, на экране висело
+  // «Разбираю папку…» без единой цифры. На большой библиотеке это минуты, и
+  // выглядело как зависание. Теперь сверху общий прогресс, ниже — по плейлистам.
+  let pollTimer = null;
+  let currentJobId = null;
+
+  const stopPolling = () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  };
+
+  const drawProgress = (job) => {
+    const stageText = {
+      walk: 'Обход папки',
+      playlists: `Разбор плейлистов ${job.done} из ${job.total}`,
+      done: 'Готово',
+      error: 'Ошибка',
+    }[job.stage] || job.stage;
+
+    const bar = el('div', { class: 'progress' },
+      el('div', { class: 'progress-fill running', style: `width:${job.percent}%` }));
+
+    // Строки по каждому плейлисту: жёлтый вопрос — ещё не обработан,
+    // далее «разбираю»/«сопоставляю», в конце галочка или крестик.
+    const rows = (job.items || []).map((item) => {
+      const cls = item.state === 'done' ? 'created'
+        : item.state === 'error' ? 'error' : 'pending';
+      const label = item.state === 'error' ? item.error
+        : item.state === 'done' ? `${item.matched} из ${item.total} треков`
+        : item.state === 'parsing' ? 'Разбираю…'
+        : item.state === 'matching' ? 'Сопоставляю…'
+        : 'В очереди';
+      return el('div', { class: 'import-card' },
+        el('div', { class: 'row' },
+          el('span', { class: `import-status ${cls}`,
+                       title: item.state === 'done' ? 'Готово'
+                            : item.state === 'error' ? 'Ошибка' : 'Ещё не обработан' }, ''),
+          el('div', { class: 'track-main' },
+            el('strong', { class: 'ellipsis' }, item.name),
+            el('span', { class: 'muted tiny ellipsis' }, label),
+          ),
+        ),
+      );
+    });
+
+    return [
+      el('div', { class: 'import-progress' },
+        el('div', { class: 'row' },
+          el('span', { class: 'small' }, `${stageText} · ${job.percent}%`),
+          job.current ? el('span', { class: 'muted small ellipsis' }, job.current) : null,
+        ),
+        bar,
+      ),
+      rows.length ? el('div', { class: 'import-list' }, ...rows) : null,
+    ].filter(Boolean);
+  };
+
   const previewButton = el('button', {
     class: 'primary',
     onclick: async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
-      fill(result, el('p', { class: 'muted' }, 'Разбираю папку…'));
+      stopPolling();
+      fill(result, el('p', { class: 'muted' }, 'Запускаю разбор…'));
       try {
         await saveSettings();
-        const data = await api(
-          `/api/web/playlists/import/preview?dir=${encodeURIComponent(dirInput.value.trim())}`
-        );
-        renderPreview(result, data, dirInput.value.trim());
+        const job = await api('/api/web/playlists/import/start', {
+          method: 'POST',
+          body: JSON.stringify({ dir: dirInput.value.trim() }),
+        });
+        currentJobId = job.id;
+        fill(result, ...drawProgress(job));
+
+        pollTimer = setInterval(async () => {
+          try {
+            const state = await api(`/api/web/playlists/import/jobs/${job.id}`);
+            fill(result, ...drawProgress(state));
+            if (state.state === 'done') {
+              stopPolling();
+              renderPreview(result, state.result, dirInput.value.trim(), job.id);
+              button.disabled = false;
+            } else if (state.state === 'error') {
+              stopPolling();
+              fill(result, el('p', { class: 'error' }, state.error || 'разбор не удался'));
+              button.disabled = false;
+            }
+          } catch (error) {
+            stopPolling();
+            fill(result, el('p', { class: 'error' }, error.message));
+            button.disabled = false;
+          }
+        }, 700);
       } catch (error) {
         fill(result, el('p', { class: 'error' }, error.message));
-      } finally {
         button.disabled = false;
       }
     },
@@ -438,7 +570,7 @@ async function renderImport(view) {
   );
 }
 
-function renderPreview(container, data, dir) {
+function renderPreview(container, data, dir, jobId = null) {
   const playlists = data.playlists || [];
   if (!playlists.length) {
     fill(container, el('p', { class: 'muted' }, 'Плейлистов не найдено'));
@@ -463,7 +595,8 @@ function renderPreview(container, data, dir) {
 
   const rows = playlists.map((pl) => {
     const decision = decisions.get(pl.path);
-    const statusIcon = el('span', { class: 'import-status' }, '');
+    // «Ещё не обработан» — жёлтый знак вопроса (CSS .import-status.pending).
+    const statusIcon = el('span', { class: 'import-status pending', title: 'Ещё не обработан' }, '');
     const statusText = el('span', { class: 'muted small' }, '');
 
     const actionSelect = el('select', {
@@ -502,9 +635,11 @@ function renderPreview(container, data, dir) {
                 },
               },
                 el('option', { value: '' }, '— не добавлять —'),
+                // Причину совпадения показываем в подписи: иначе список из
+                // похожих строк непонятно чем отличается.
                 ...(item.candidates || []).map((cand) => el('option',
                   { value: String(cand.track_id) },
-                  `${cand.artist || '?'} — ${cand.title}`)),
+                  `${cand.artist || '?'} — ${cand.title}${cand.note ? ` (${cand.note})` : ''}`)),
               );
               return el('div', { class: 'row unmatched-row' },
                 el('div', { class: 'track-main' },
@@ -523,18 +658,17 @@ function renderPreview(container, data, dir) {
         statusIcon,
         el('div', { class: 'track-main' },
           el('strong', { class: 'ellipsis' }, pl.name),
-          el('span', { class: 'muted tiny ellipsis' }, pl.path),
+          // Метаданные в одну строку с путём: карточка ниже, читается так же.
+          el('span', { class: 'muted tiny ellipsis' },
+            pl.error
+              ? pl.error
+              : `${pl.matched} из ${pl.total} треков` +
+                (pl.existing_id ? ` · уже есть: ${pl.existing_count}` : '') +
+                ` · ${pl.path}`),
         ),
         statusText,
       ),
-      pl.error
-        ? el('p', { class: 'error small' }, pl.error)
-        : el('div', { class: 'row' },
-            el('span', { class: 'small' },
-              `треков ${pl.matched} из ${pl.total}` +
-              (pl.existing_id ? ` · уже есть: ${pl.existing_count}` : '')),
-          ),
-      el('div', { class: 'row' },
+      pl.error ? null : el('div', { class: 'row import-controls' },
         el('label', { class: 'inline' }, 'Действие'), actionSelect,
         el('label', { class: 'inline' }, publicBox, 'публичный'),
       ),
@@ -551,11 +685,17 @@ function renderPreview(container, data, dir) {
       const cards = [...container.querySelectorAll('.import-card')];
       cards.forEach((card) => {
         const icon = card.querySelector('.import-status');
-        if (icon) icon.textContent = '…';
+        if (icon) {
+          icon.className = 'import-status pending';
+          icon.title = 'Обрабатывается';
+          icon.textContent = '';
+        }
       });
 
       const payload = {
         dir,
+        // job_id: применяем уже разобранные планы, не разбирая папку заново.
+        job_id: jobId,
         items: playlists.map((pl) => ({
           path: pl.path,
           ...decisions.get(pl.path),

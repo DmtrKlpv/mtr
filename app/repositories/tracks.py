@@ -285,7 +285,10 @@ class TrackRepository:
         if not cleaned:
             return []
         limit = max(1, min(int(limit), 500))
-        like = f"%{cleaned.replace('%', r'\%').replace('_', r'\_')}%"
+        # Экранируем и обратную косую: без неё запрос с "\\" ломает шаблон LIKE
+        # (ESCAPE '\\' съедает следующий символ). Порядок замен важен: сначала "\\".
+        escaped = cleaned.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+        like = f"%{escaped}%"
         rows = await self._db.fetch_all(
             """
             SELECT * FROM tracks
@@ -324,6 +327,10 @@ class TrackRepository:
     # ------------------------------------------------------------------
     # Запись
     # ------------------------------------------------------------------
+    def batch(self):
+        """Общая транзакция для пачки записей (см. library_scanner._parse_batch)."""
+        return self._db.transaction()
+
     async def upsert_from_metadata(self, meta: TrackMetadata) -> UpsertOutcome:
         """Вставляет или обновляет трек по пути.
 
@@ -585,6 +592,19 @@ class TrackRepository:
         )
         return None if row is None else _row_to_track(row)
 
+    async def all_live_for_index(self) -> list[dict[str, object]]:
+        """Все живые треки минимальным набором полей — для индекса сопоставления.
+
+        Нужен построителю `app.playlists.matching.TrackIndex`: сравнение по
+        базовому названию и нормализованному имени файла делается в памяти,
+        иначе на 38 000 треков это были бы десятки тысяч запросов.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT id, path, filename, title, artist, album, album_id, "
+            "duration_ms, missing FROM tracks WHERE missing = 0"
+        )
+        return [dict(row) for row in rows]
+
     async def find_by_filename(self, filename: str, *, limit: int = 5) -> list[TrackRow]:
         """Треки с таким именем файла.
 
@@ -683,3 +703,10 @@ class TrackRepository:
                 "updated_at = excluded.updated_at",
                 (track_id, played_at, played_at),
             )
+
+
+async def _optimize(self) -> None:  # pragma: no cover - тонкая обёртка над Database
+    await self._db.optimize()
+
+
+TrackRepository.optimize = _optimize

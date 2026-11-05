@@ -66,6 +66,9 @@ class Database:
         self.path = Path(path)
         self.label = label
         self._conn: aiosqlite.Connection | None = None
+        # Отдельное соединение только для чтения (WAL): чтения веба не стоят в очереди
+        # за записями сканера в одном потоке aiosqlite.
+        self._reader_conn: aiosqlite.Connection | None = None
 
         # Сериализация записи и владение транзакцией.
         self._tx_lock = asyncio.Lock()
@@ -101,12 +104,21 @@ class Database:
         # Таймаут ожидания блокировки на уровне SQLite (мс).
         await conn.execute("PRAGMA busy_timeout=5000")
         await conn.execute("PRAGMA temp_store=MEMORY")
+        if str(self.path) != ":memory:":
+            reader = await aiosqlite.connect(self.path, isolation_level=None)
+            reader.row_factory = aiosqlite.Row
+            await reader.execute("PRAGMA busy_timeout=5000")
+            await reader.execute("PRAGMA query_only=ON")
+            self._reader_conn = reader
         logger.info("[%s] подключена база %s", self.label, self.path)
 
     async def close(self) -> None:
         """Закрывает соединение, дожидаясь сброса WAL."""
         if self._conn is None:
             return
+        if self._reader_conn is not None:
+            await self._reader_conn.close()
+            self._reader_conn = None
         with contextlib.suppress(sqlite3.Error):
             # TRUNCATE сворачивает -wal файл; полезно при остановке контейнера.
             await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -124,6 +136,17 @@ class Database:
                 f"[{self.label}] соединение не открыто — вызовите await connect()"
             )
         return self._conn
+
+    def _reader(self) -> aiosqlite.Connection:
+        """Соединение для чтения.
+
+        Владелец открытой транзакции читает через writer: ему нужны его же незакоммиченные
+        строки. Остальные читают через читающее соединение и видят последний закоммиченный
+        снимок, не дожидаясь записи в очереди.
+        """
+        if self._reader_conn is None or self._owns_transaction():
+            return self.conn
+        return self._reader_conn
 
     @property
     def in_transaction(self) -> bool:
@@ -244,7 +267,7 @@ class Database:
         """Возвращает первую строку или None."""
 
         async def _do():
-            cursor = await self.conn.execute(sql, tuple(params or ()))
+            cursor = await self._reader().execute(sql, tuple(params or ()))
             try:
                 return await cursor.fetchone()
             finally:
@@ -258,7 +281,7 @@ class Database:
         """Возвращает все строки."""
 
         async def _do():
-            cursor = await self.conn.execute(sql, tuple(params or ()))
+            cursor = await self._reader().execute(sql, tuple(params or ()))
             try:
                 return await cursor.fetchall()
             finally:
@@ -359,6 +382,17 @@ class Database:
     # ------------------------------------------------------------------
     # Миграции
     # ------------------------------------------------------------------
+    async def optimize(self) -> None:
+        """Лёгкое обновление статистики планировщика (PRAGMA optimize).
+
+        Вызывается после записи больших объёмов (скан), чтобы планы запросов
+        не деградировали на растущей библиотеке. Ошибки не критичны.
+        """
+        try:
+            await self.execute("PRAGMA optimize")
+        except Exception:  # noqa: BLE001 - оптимизация не должна ронять запись
+            logger.debug("[%s] PRAGMA optimize не выполнен", self.label, exc_info=True)
+
     async def get_user_version(self) -> int:
         """Текущая версия схемы (PRAGMA user_version)."""
         return int(await self.fetch_value("PRAGMA user_version", default=0) or 0)

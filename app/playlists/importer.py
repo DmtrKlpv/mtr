@@ -27,6 +27,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from app.playlists.matching import MATCH_LABELS, TrackIndex
 from app.playlists.m3u import M3UEntry, M3UError, parse_m3u
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,12 @@ class Candidate:
     title: str
     artist: str | None
     album: str | None
-    match: str          # "path" | "filename" | "title" | "prefix"
+    # "path" | "filename" | "title" | "prefix" | "title_artist" | "title_base" |
+    # "filename_norm". Приблизительные варианты помечаются отдельно: интерфейс
+    # показывает причину, чтобы список из похожих строк был понятен.
+    match: str
+    # Человекочитаемая причина: «по названию без feat», «по имени файла».
+    note: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -67,6 +73,7 @@ class Candidate:
             "artist": self.artist,
             "album": self.album,
             "match": self.match,
+            "note": self.note,
         }
 
 
@@ -298,6 +305,7 @@ async def match_entries(
     prefix_from: str = "",
     prefix_to: str = "",
     max_candidates: int = 5,
+    index: TrackIndex | None = None,
 ) -> tuple[list[int | None], list[UnmatchedEntry]]:
     """Сопоставляет записи с библиотекой.
 
@@ -367,6 +375,36 @@ async def match_entries(
                     candidates=[
                         Candidate(t.id, t.path, t.title, t.artist, t.album, "title")
                         for t in found
+                    ],
+                ))
+                continue
+
+        # 4. Приблизительные варианты.
+        #
+        # Сюда попадают пары, где теги разъехались: в плейлисте исполнитель
+        # перечислением, в библиотеке он один, а соавторы вынесены в название.
+        # Такие совпадения НЕ подставляем молча: показываем варианты с причиной,
+        # решение принимает пользователь.
+        if index is not None:
+            suggestions = index.suggest(
+                title=entry.title,
+                artist=entry.artist,
+                filename=filename or None,
+                limit=max_candidates,
+            )
+            if suggestions:
+                matched.append(None)
+                unmatched.append(UnmatchedEntry(
+                    raw_path=raw, title=entry.title, artist=entry.artist,
+                    reason="похожие треки — выберите подходящий",
+                    candidates=[
+                        Candidate(
+                            int(track["id"]), str(track["path"]),
+                            str(track.get("title") or ""),
+                            track.get("artist"), track.get("album"),
+                            label, MATCH_LABELS.get(label, ""),
+                        )
+                        for track, label in suggestions
                     ],
                 ))
                 continue

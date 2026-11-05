@@ -762,6 +762,15 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
    в колонке 40% полноразмерный 40px не помещается. */
 .pl-hero-title { font-size: 30px; margin-bottom: 6px; }
 .album-hero-artist { color: var(--muted); font-size: 15px; }
+/* Ссылка на исполнителя в альбоме: выглядит как обычный текст (без подчёркивания
+   и цвета ссылки), но кликабельна и подсвечивается при наведении. */
+.artist-plain-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.artist-plain-link:hover,
+.artist-plain-link:focus-visible { color: var(--text); outline: none; }
 
 /* ---------- Коллаж 2x2 из обложек ---------- */
 
@@ -903,17 +912,37 @@ label.inline {
 
 /* ---------- Импорт ---------- */
 
-.import-list { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+/* Список импортированных плейлистов.
+   Раньше карточка занимала много места: 14 px по вертикали, иконка 24 px,
+   отдельные строки под метаданные. Теперь высота меньше: плотные отступы,
+   метаданные в одну строку с названием. */
+.import-list { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
 .import-card {
   background: var(--panel);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px;
+  border-radius: var(--radius);
+  padding: 9px 12px;
 }
+.import-card .row { gap: 8px; }
+.import-card .track-main { min-width: 0; }
+/* Строка «треков N из M» — компактно, сразу под названием, без лишней высоты. */
+.import-card .import-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  margin-top: 2px;
+}
+.import-card .import-controls { gap: 10px; margin-top: 6px; }
+.import-card select { padding: 6px 12px; min-width: 130px; }
+.import-card .unmatched { margin-top: 6px; }
+
 .import-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px; height: 24px;
+  width: 22px; height: 22px;
   flex: none;
   font-weight: 700;
   border-radius: 50%;
@@ -924,10 +953,24 @@ label.inline {
 }
 .import-status.error { color: var(--danger); background: rgba(255, 95, 95, .14); }
 .import-status.skipped { color: var(--muted); }
-.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped) {
-  border: 2px solid var(--line-2);
-  border-top-color: var(--accent);
-  animation: spin .8s linear infinite;
+/* Ожидание больше не крутится спиннером: жёлтый знак вопроса означает
+   «ещё не обработан», и по нему спокойно видно, что процесс идёт. */
+.import-status.pending {
+  color: var(--warn, #f0b429);
+  background: rgba(240, 180, 41, .14);
+  background-image: url("/static/icons/help.svg");
+  background-size: 15px 15px;
+  background-position: center;
+  background-repeat: no-repeat;
+  font-size: 0;
+}
+.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped):not(.pending) {
+  color: var(--warn, #f0b429);
+  background: rgba(240, 180, 41, .14);
+  background-image: url("/static/icons/help.svg");
+  background-size: 15px 15px;
+  background-position: center;
+  background-repeat: no-repeat;
   font-size: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1028,6 +1071,43 @@ label.inline {
 .mtr-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
 
+/* ---------- Хлебные крошки ----------
+
+   Заменяют кнопку «назад» в альбоме: видно, где находишься и куда вернуться.
+   Отступы сверху и снизу заданы здесь, а не у кнопки, чтобы крошки не липли
+   к шапке и к обложке.
+*/
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 22px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  min-height: 32px;
+}
+.breadcrumbs a,
+.breadcrumbs button.breadcrumb-link {
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 4px 2px;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+.breadcrumbs a:hover,
+.breadcrumbs button.breadcrumb-link:hover { color: var(--text); }
+.breadcrumbs .sep { color: var(--muted-2); }
+.breadcrumbs .current { color: var(--text); font-weight: 600; }
+.breadcrumbs .crumb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+}
+
 /* ---------- Логин ---------- */
 
 .login-body {
@@ -1050,6 +1130,47 @@ label.inline {
 #login-form label { font-size: var(--fs-small); color: var(--muted); }
 #login-form input { width: 100%; }
 #login-form button { margin-top: 10px; width: 100%; }
+
+/* ---------- Первый запуск: создание администратора ----------
+
+   Раньше поля были в общей колонке с gap 8px и шириной карточки 384px:
+   подписи липли к полям, а сами поля были короче половины экрана.
+   Здесь карточка шире (576px = прежние 384 x 1.5), каждое поле — отдельная
+   группа с подписью и отступом, сами поля растянуты на всю ширину.
+*/
+.login-card.setup-card {
+  width: min(94vw, 576px);
+  text-align: left;
+  padding: 40px 36px;
+}
+.login-card.setup-card .setup-head { text-align: center; }
+.login-card.setup-card .setup-head .muted { margin: 6px 0 26px; }
+#setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;          /* отступ между группами полей */
+  text-align: left;
+  margin-top: 4px;
+}
+#setup-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;           /* отступ между подписью и полем */
+}
+#setup-form label {
+  font-size: var(--fs-small);
+  color: var(--muted);
+  padding-left: 4px;
+}
+#setup-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 13px 18px;
+  min-height: 46px;
+}
+#setup-form .field-hint { font-size: var(--fs-small); color: var(--muted-2); padding-left: 4px; }
+#setup-form button { width: 100%; min-height: 46px; margin-top: 6px; }
+#setup-form .error { margin-top: -6px; }
 
 /* ---------- Плеер: три зоны ---------- */
 
@@ -1220,11 +1341,11 @@ label.inline {
 /* Таблица ошибок скана: файл и причина, видно сразу, без раскрытия.
    Прокрутка ограничена: при массовом сбое строк бывают сотни. */
 .error-table-wrap {
-  margin: 8px 0 4px;
-  max-height: 320px;
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+    margin: 8px 0 4px;
+    /* max-height: 320px; */
+    /* overflow: auto; */
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
 }
 .error-table {
   width: 100%;

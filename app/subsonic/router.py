@@ -44,6 +44,17 @@ router = APIRouter(prefix="/rest", tags=["subsonic"])
 DEFAULT_SEARCH_SONGS = 50
 MAX_SEARCH_COUNT = 500
 
+# Папки в старом ID3-режиме (getIndexes → getMusicDirectory).
+#
+# id исполнителей здесь ТЕ ЖЕ, что в getArtists и getArtist: числа. Клиент
+# ожидает один и тот же id исполнителя во всех методах.
+#
+# Конфликт: исполнитель 1 и альбом 1 — разные сущности с одним числом. Поэтому
+# альбомы внутри папки исполнителя (и треки внутри альбома) получают префикс
+# «al-<id>». Числовой id в getMusicDirectory означает исполнителя, если такой
+# есть, иначе альбом — как и раньше для клиентов, знающих id альбома из getAlbum.
+ALBUM_FOLDER_PREFIX = "al-"
+
 
 # ----------------------------------------------------------------------
 # Вспомогательное
@@ -61,9 +72,17 @@ def _api(auth: AuthContext) -> str:
 
 
 def _int_param(
-    value: str | None, *, default: int, name: str, minimum: int = 0, maximum: int = 10_000
+    value: str | None, *, default: int, name: str, minimum: int = 0,
+    maximum: int | None = None,
 ) -> int:
-    """Разбор целочисленного query-параметра с понятной ошибкой."""
+    """Разбор целочисленного query-параметра с понятной ошибкой.
+
+    Потолок (``maximum``) по умолчанию НЕ применяется. Раньше здесь стояло
+    10 000, и оно молча обрезало идентификаторы: любой трек с id > 10000
+    превращался в 10000, из-за чего все файлы «сверх лимита» слипались в один
+    и тот же трек. Ограничивать имеет смысл только размеры выборок (size,
+    offset, *_count), и там ``maximum`` передаётся явно.
+    """
     if value is None or not str(value).strip():
         return default
     try:
@@ -72,7 +91,11 @@ def _int_param(
         raise SubsonicError(
             ErrorCode.GENERIC, f"Invalid value for parameter {name}: {value!r}"
         ) from exc
-    return max(minimum, min(parsed, maximum))
+    if parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
 
 
 def _register(method: str, *paths: str) -> Callable:
@@ -153,7 +176,10 @@ async def start_scan(
     """
     ctx = _ctx(request)
     mode = "full" if (fullScan or "").lower() in ("true", "1", "yes") else "incremental"
-    await ctx.scanner.scan(mode=mode)
+    # Скан идёт в worker-процессе: ставим команду и отвечаем сразу.
+    from app.worker.ipc import enqueue
+
+    await enqueue(ctx.music_db, "scan", {"mode": mode})
     count = await ctx.tracks.count_tracks()
     return ok_response(
         {
@@ -253,14 +279,117 @@ async def get_indexes(
 ) -> JSONResponse:
     """Устаревший обход библиотеки. Оставлен для старых клиентов."""
     artists = await _library(request).list_artists()
+    index = fmt.legacy_index_json(artists)
     return ok_response(
         {
             "indexes": {
                 "lastModified": _ctx(request).settings.subsonic_api_version,
                 "ignoredArticles": "",
-                "index": fmt.legacy_index_json(artists),
+                "index": index,
             }
         },
+        api_version=_api(auth),
+    )
+
+
+@_register("GET", "/getMusicDirectory.view", "/getMusicDirectory")
+async def get_music_directory(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    id: str | None = Query(None),
+) -> JSONResponse:
+    """Обход по «папкам»: исполнитель → альбомы → треки.
+
+    Папка исполнителя: числовой id (тот же, что в getArtists).
+    Папка альбома: «al-<id>» (внутри папки исполнителя) или числовой id.
+    """
+    if not id:
+        raise missing("id")
+    lib = _library(request)
+
+    if id.startswith(ALBUM_FOLDER_PREFIX):
+        album_id = _int_param(id[len(ALBUM_FOLDER_PREFIX):], default=0, name="id", minimum=1)
+        return await _album_folder(request, auth, lib, album_id)
+
+    entity_id = _int_param(id, default=0, name="id", minimum=1)
+    if await lib.get_artist(entity_id) is not None:
+        return await _artist_folder(request, auth, lib, entity_id)
+    return await _album_folder(request, auth, lib, entity_id)
+
+
+async def _album_folder(
+    request: Request, auth: AuthContext, lib: LibraryRepository, album_id: int
+) -> JSONResponse:
+    """Папка альбома: его треки. parent у треков — «al-<id>», чтобы навигация не
+    путала альбом с исполнителем того же номера."""
+    album = await lib.get_album(album_id)
+    if album is None:
+        raise SubsonicError(ErrorCode.NOT_FOUND, f"Folder {album_id} not found")
+    children = []
+    for track in await lib.album_tracks(album_id):
+        child = fmt.child_json(track)
+        child["parent"] = f"{ALBUM_FOLDER_PREFIX}{album_id}"
+        children.append(child)
+    return ok_response(
+        {
+            "directory": {
+                "id": f"{ALBUM_FOLDER_PREFIX}{album_id}",
+                "name": album.name,
+                "child": children,
+            }
+        },
+        api_version=_api(auth),
+    )
+
+
+async def _artist_folder(
+    request: Request, auth: AuthContext, lib: LibraryRepository, artist_id: int
+) -> JSONResponse:
+    """Папка исполнителя: его альбомы как вложенные папки («al-<id>»)."""
+    artist = await lib.get_artist(artist_id)
+    if artist is None:
+        raise SubsonicError(ErrorCode.NOT_FOUND, f"Artist folder {artist_id} not found")
+    children = [
+        {
+            "id": f"{ALBUM_FOLDER_PREFIX}{item.id}",
+            "parent": str(artist_id),
+            "isDir": True,
+            "title": item.name,
+            "album": item.name,
+            "artist": artist.name,
+            "year": item.year,
+        }
+        for item in await lib.artist_albums(artist_id)
+    ]
+    return ok_response(
+        {
+            "directory": {
+                "id": str(artist_id),
+                "name": artist.name,
+                "child": children,
+            }
+        },
+        api_version=_api(auth),
+    )
+
+
+@_register("GET", "/getArtistInfo2.view", "/getArtistInfo2")
+@_register("GET", "/getArtistInfo.view", "/getArtistInfo")
+async def get_artist_info(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    id: str | None = Query(None),
+) -> JSONResponse:
+    """Информация об исполнителе: биография, похожие, картинки.
+
+    Внешних источников у нас нет, поэтому отдаём пустую, но валидную структуру.
+    Главное — не 404: клиенты вызывают этот метод при открытии исполнителя и на
+    ошибке показывают пустую страницу вместо списка альбомов.
+    """
+    if not id:
+        raise missing("id")
+    return ok_response(
+        {"artistInfo2": {"biography": "", "similarArtist": [], "imageUrl": []}},
         api_version=_api(auth),
     )
 
@@ -435,9 +564,16 @@ async def search_legacy(
             {"searchResult": {"match": []}}, api_version=_api(auth)
         )
 
-    limit_artists = _int_param(artistCount, default=20, name="artistCount")
-    limit_albums = _int_param(albumCount, default=20, name="albumCount")
-    limit_songs = _int_param(songCount, default=DEFAULT_SEARCH_SONGS, name="songCount")
+    limit_artists = _int_param(
+        artistCount, default=20, name="artistCount", maximum=MAX_SEARCH_COUNT
+    )
+    limit_albums = _int_param(
+        albumCount, default=20, name="albumCount", maximum=MAX_SEARCH_COUNT
+    )
+    limit_songs = _int_param(
+        songCount, default=DEFAULT_SEARCH_SONGS, name="songCount",
+        maximum=MAX_SEARCH_COUNT,
+    )
 
     artists = await lib.search_artists(text, limit=limit_artists) if limit_artists else []
     albums = await lib.search_albums(text, limit=limit_albums) if limit_albums else []
@@ -592,3 +728,38 @@ async def export_playlist_m3u(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+
+# ----------------------------------------------------------------------
+# Методы, которые клиенты вызывают, но данных для них у нас нет
+#
+# Раньше на них приходил 404 в формате FastAPI: {"detail": "Not Found"}.
+# Разбор такого ответа в клиенте падает или показывает пустоту, хотя остальные
+# разделы работают — со стороны это выглядит как «сломан один раздел».
+#
+# Отдаём валидный пустой ответ Subsonic: клиент видит «метод есть, данных нет».
+# Перечисляем явно, а не ловим всё подряд: перехват /rest/* перекрыл бы
+# getCoverArt, который регистрируется отдельным роутером ниже.
+# ----------------------------------------------------------------------
+async def _empty_ok(request: Request, auth: AuthContext = Depends(require_auth)) -> JSONResponse:
+    return ok_response({}, api_version=_api(auth))
+
+
+@_register("GET", "/getTopSongs.view", "/getTopSongs")
+@_register("GET", "/getSimilarSongs.view", "/getSimilarSongs")
+@_register("GET", "/getSimilarSongs2.view", "/getSimilarSongs2")
+@_register("GET", "/getLyrics.view", "/getLyrics")
+@_register("GET", "/getLyricsBySongId.view", "/getLyricsBySongId")
+@_register("GET", "/getRandomSongs.view", "/getRandomSongs")
+@_register("GET", "/getAlbumInfo.view", "/getAlbumInfo")
+@_register("GET", "/getAlbumInfo2.view", "/getAlbumInfo2")
+@_register("GET", "/getChatMessages.view", "/getChatMessages")
+@_register("GET", "/getBookmarks.view", "/getBookmarks")
+@_register("GET", "/getPlayQueue.view", "/getPlayQueue")
+@_register("GET", "/getShares.view", "/getShares")
+@_register("GET", "/getPodcasts.view", "/getPodcasts")
+@_register("GET", "/getInternetRadioStations.view", "/getInternetRadioStations")
+async def empty_method(request: Request, auth: AuthContext = Depends(require_auth)) -> JSONResponse:
+    """Пустой, но валидный ответ для методов без данных в этой реализации."""
+    return await _empty_ok(request, auth)

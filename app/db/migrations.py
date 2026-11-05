@@ -26,7 +26,7 @@ SCHEMA_DIR = Path(__file__).resolve().parent
 SCHEMA_VERSION = 2
 # У музыкальной базы своя версия: она меняется чаще, и поднимать из-за этого
 # версию пользовательской базы (с паролями и сессиями) незачем.
-MUSIC_SCHEMA_VERSION = 4
+MUSIC_SCHEMA_VERSION = 6
 
 # v2: сессии веб-интерфейса. В v1 таблица sessions уже есть, но хранит
 # открытый id и не умеет CSRF. Миграция перестраивает её:
@@ -59,6 +59,18 @@ CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions (expires_at);
 MIGRATION_MUSIC_V3_ERRORS = """
 ALTER TABLE scan_runs ADD COLUMN errors_total INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE scan_runs ADD COLUMN errors_json TEXT;
+"""
+
+# v5 (только mtr_music.db): очередь команд для worker-процесса (скан, перечитать настройки).
+MIGRATION_MUSIC_V5_WORKER = """
+CREATE TABLE IF NOT EXISTS worker_commands (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT    NOT NULL,
+    payload     TEXT,
+    created_at  TEXT    NOT NULL,
+    handled_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_worker_commands_pending ON worker_commands (handled_at, id);
 """
 
 # v4 (только mtr_music.db): импорт плейлистов из папки и ресинк.
@@ -135,6 +147,17 @@ async def _migrate_music(db: Database) -> None:
         # поэтому ALTER из v4 применяется ровно один раз в любом пути.
         logger.info("mtr_music.db: применяю миграцию v4 (импорт папок, индексы)")
         await db.executescript(MIGRATION_MUSIC_V4_FOLDER_SYNC)
+    if current < 5:
+        logger.info("mtr_music.db: применяю миграцию v5 (очередь команд worker)")
+        await db.executescript(MIGRATION_MUSIC_V5_WORKER)
+
+    # Статистика для планировщика SQLite. Без неё план запросов по исполнителям
+    # выбирается вслепую: индекс tracks(missing) с двумя значениями кажется
+    # селективным, и каждый запрос перебирает почти всю таблицу треков.
+    # Замер: list_artists на 20k треков — 3.7 с без статистики, 23 мс с ней.
+    # ANALYZE один раз при обновлении схемы; дальше PRAGMA optimize держит статистику.
+    if current < MUSIC_SCHEMA_VERSION:
+        await db.execute("ANALYZE")
 
     await db.set_user_version(MUSIC_SCHEMA_VERSION)
     logger.info("mtr_music.db готова, версия схемы %d", MUSIC_SCHEMA_VERSION)
