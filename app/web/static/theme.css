@@ -1,34 +1,83 @@
 /* Единственное место, где задан акцентный цвет.
 
-   Чтобы сменить акцент во всём интерфейсе, достаточно поправить три
-   переменные ниже — остальной CSS ссылается только на них.
-
-   Текущий цвет — из фавикона проекта (#d7e021), тот же, что у иконки
-   приложения. Он используется для активного пункта рейла, кнопок
-   действия, полосы прогресса и подсветки играющего трека.
+   Тема выбирается в настройках («Оформление: цвет акцента») и ставится
+   атрибутом data-accent на <html>. Здесь — по набору на каждый вариант.
+   Остальной CSS ссылается только на переменные, поэтому новый цвет не
+   требует правок в style.css.
 
    --accent      основной акцент
    --accent-ink  цвет текста/иконки НА акцентном фоне (контраст)
    --accent-soft полупрозрачный акцент для фонов и подсветок
-   --accent-dark акцент для наведения (чуть темнее основного) */
+   --accent-dark акцент для наведения (чуть темнее основного)
+   --accentlight светлый вариант акцента (акцент на тёмном фоне)
 
-/*blue*/
+   Цвет по умолчанию — синий. Он же стоит без атрибута, чтобы тема
+   отображалась до загрузки настроек и на страницах входа. */
 
 :root {
   --accent: #1E90FF;
   --accent-ink: #101014;
-  --accentlight:#FFFFFF;
+  --accentlight: #FFFFFF;
   --accent-soft: rgba(30, 144, 255, 0.14);
   --accent-dark: #4169E1;
 }
 
-/*green*/
+/* Значения повторяют :root намеренно: атрибут важнее, но если :root когда-нибудь
+   переедет в другой файл, синий останется рабочим. */
 
-/*
-:root {
+:root[data-accent="blue"] {
+  --accent: #1E90FF;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(30, 144, 255, 0.14);
+  --accent-dark: #4169E1;
+}
+
+/* Цвет иконки проекта: #d7e021. */
+:root[data-accent="green"] {
   --accent: #d7e021;
   --accent-ink: #101014;
+  --accentlight: #FFFFFF;
   --accent-soft: rgba(215, 224, 33, 0.14);
   --accent-dark: #bcc41c;
 }
-*/
+
+:root[data-accent="violet"] {
+  --accent: #A78BFA;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(167, 139, 250, 0.14);
+  --accent-dark: #8B6CE8;
+}
+
+:root[data-accent="orange"] {
+  --accent: #FB923C;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(251, 146, 60, 0.14);
+  --accent-dark: #EA7C1F;
+}
+
+:root[data-accent="teal"] {
+  --accent: #2DD4BF;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(45, 212, 191, 0.14);
+  --accent-dark: #14B8A6;
+}
+
+:root[data-accent="pink"] {
+  --accent: #F472B6;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(244, 114, 182, 0.14);
+  --accent-dark: #E8559E;
+}
+
+:root[data-accent="red"] {
+  --accent: #F87171;
+  --accent-ink: #101014;
+  --accentlight: #FFFFFF;
+  --accent-soft: rgba(248, 113, 113, 0.14);
+  --accent-dark: #E14B4B;
+}

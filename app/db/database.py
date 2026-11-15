@@ -41,6 +41,8 @@ from typing import Any
 
 import aiosqlite
 
+from app.utils.alphabet import fold, letter_of
+
 logger = logging.getLogger(__name__)
 
 # Сколько раз повторять запрос, если база занята другим соединением.
@@ -94,6 +96,11 @@ class Database:
             raise DatabaseError(f"[{self.label}] не удалось открыть {self.path}") from exc
 
         conn.row_factory = aiosqlite.Row
+        # Рубрикатор фильтрует в SQL: при LIMIT/OFFSET фильтр по странице не работает.
+        await conn.create_function("mtr_letter", 1, letter_of, deterministic=True)
+        # Поиск без учёта регистра и без разницы е/ё. Встроенный lower() в SQLite
+        # понимает только латиницу, поэтому кириллица искалась с учётом регистра.
+        await conn.create_function("mtr_fold", 1, fold, deterministic=True)
         self._conn = conn
 
         # WAL: конкурентное чтение при записи. NORMAL — разумный компромисс
@@ -107,6 +114,8 @@ class Database:
         if str(self.path) != ":memory:":
             reader = await aiosqlite.connect(self.path, isolation_level=None)
             reader.row_factory = aiosqlite.Row
+            await reader.create_function("mtr_letter", 1, letter_of, deterministic=True)
+            await reader.create_function("mtr_fold", 1, fold, deterministic=True)
             await reader.execute("PRAGMA busy_timeout=5000")
             await reader.execute("PRAGMA query_only=ON")
             self._reader_conn = reader

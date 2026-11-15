@@ -10,6 +10,9 @@ const state = {
   albums: [],
   view: 'library',
   libraryView: 'albums',   // artists | albums | playlists
+  // Выбранная буква рубрикатора, отдельно на каждую вкладку: переключение
+  // вкладок не должно сбрасывать чужой фильтр.
+  letters: { artists: '', albums: '', playlists: '' },
   starred: new Set(),
   queue: [],
   queueIndex: -1,
@@ -287,6 +290,50 @@ async function renderAlbumsView(view) {
 }
 
 // Переключатель вкладок библиотеки. Общий для главной и вида «Альбомы».
+/* ---------- Алфавитный рубрикатор ---------- */
+
+const ALPHABET = [
+  '0-9',
+  ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  ...'АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ',
+  'Другие',
+];
+
+// Ответ на устаревший запрос не должен перерисовать уже выбранную букву.
+const renderTokens = new WeakMap();
+function beginRender(node) {
+  const token = (renderTokens.get(node) || 0) + 1;
+  renderTokens.set(node, token);
+  return () => renderTokens.get(node) === token;
+}
+
+function letterQuery(letter) {
+  return letter ? `&letter=${encodeURIComponent(letter)}` : '';
+}
+
+function alphabetBar(current, onPick) {
+  return el('nav', { class: 'alpha-bar', 'aria-label': 'Алфавит' },
+    ...['', ...ALPHABET].map((key) => el('button', {
+      type: 'button',
+      class: 'alpha-btn' + (key === current ? ' active' : ''),
+      'aria-pressed': key === current ? 'true' : 'false',
+      onclick: () => onPick(key === current ? '' : key),
+    }, key || 'Все')),
+  );
+}
+
+function pickLetter(kind, letter) {
+  state.letters[kind] = letter;
+  const body = $('#library-body');
+  if (!body) return;
+  const draw = {
+    artists: renderArtistsInto,
+    albums: renderAlbumsInto,
+    playlists: renderPlaylistsInto,
+  }[kind];
+  draw(body).catch((error) => toast(error.message, 'error'));
+}
+
 function librarySwitcher() {
   return el('div', { class: 'segmented', role: 'tablist' },
     ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
@@ -488,17 +535,18 @@ async function renderLibrary(view) {
       trackList.replaceChildren(el('p', { class: 'muted' }, 'Ничего не найдено'));
       return;
     }
+    // Порядок разделов: исполнители, затем альбомы, затем треки — сначала то,
+    // что искали (имя исполнителя), в конце — длинный список отдельных треков.
     const blocks = [];
-    if (tracks.length) {
+    if (artists.length) {
       blocks.push(
-        el('div', { class: 'row' },
-          el('span', { class: 'muted small' }, `Треков: ${tracks.length}`),
-          el('button', {
+        el('h3', {}, `Исполнители (${artists.length})`),
+        el('div', { class: 'row wrap' },
+          ...artists.map((artist) => el('button', {
             class: 'ghost small',
-            onclick: () => { enqueue(tracks); playIndex(0); },
-          }, 'Играть все'),
+            onclick: () => openArtist(artist.id),
+          }, artist.name)),
         ),
-        ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 })),
       );
     }
     if (albums.length) {
@@ -514,15 +562,16 @@ async function renderLibrary(view) {
         ),
       );
     }
-    if (artists.length) {
+    if (tracks.length) {
       blocks.push(
-        el('h3', {}, `Исполнители (${artists.length})`),
-        el('div', { class: 'row wrap' },
-          ...artists.map((artist) => el('button', {
+        el('div', { class: 'row' },
+          el('span', { class: 'muted small' }, `Треков: ${tracks.length}`),
+          el('button', {
             class: 'ghost small',
-            onclick: () => openArtist(artist.id),
-          }, artist.name)),
+            onclick: () => { enqueue(tracks); playIndex(0); },
+          }, 'Играть все'),
         ),
+        ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 })),
       );
     }
     trackList.replaceChildren(...blocks);
@@ -642,10 +691,14 @@ function artistAvatar(artist) {
 const PAGE_SIZE = 60;
 
 async function renderAlbumsInto(node) {
-  fill(node, loadingNote());
+  const isCurrent = beginRender(node);
+  const letter = state.letters.albums;
+  const bar = alphabetBar(letter, (picked) => pickLetter('albums', picked));
+  fill(node, bar, loadingNote());
 
   let offset = 0;
   let total = 0;
+  let empty = false;
   const grid = el('div', { class: 'album-grid' });
   const footer = el('div', { class: 'row pagination' });
 
@@ -658,19 +711,22 @@ async function renderAlbumsInto(node) {
     more.disabled = true;
     let data;
     try {
-      data = await api(`/api/web/albums?limit=${PAGE_SIZE}&offset=${offset}`);
+      data = await api(`/api/web/albums?limit=${PAGE_SIZE}&offset=${offset}${letterQuery(letter)}`);
     } catch (error) {
       more.disabled = false;
       toast(error.message, 'error');
       return;
     }
+    if (!isCurrent()) return;
     const items = data.items || [];
     total = data.total ?? items.length;
     offset += items.length;
 
     if (!items.length && offset === 0) {
-      fill(node, el('p', { class: 'muted' },
-        'Библиотека пуста — запустите сканирование'));
+      empty = true;
+      fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
+        ? `Нет альбомов на «${letter}»`
+        : 'Библиотека пуста — запустите сканирование'));
       return;
     }
 
@@ -683,22 +739,26 @@ async function renderAlbumsInto(node) {
 
     const shown = grid.childElementCount;
     fill(footer,
-      el('span', { class: 'muted small' },
-        `Показано ${shown} из ${total}`),
+      el('span', { class: 'muted small' }, `Показано ${shown} из ${total}`),
       shown < total ? more : null,
     );
     more.disabled = false;
   }
 
   await loadPage();
-  fill(node, grid, footer);
+  if (!isCurrent() || empty) return;
+  fill(node, bar, grid, footer);
 }
 
 async function renderArtistsInto(node) {
-  fill(node, loadingNote());
+  const isCurrent = beginRender(node);
+  const letter = state.letters.artists;
+  const bar = alphabetBar(letter, (picked) => pickLetter('artists', picked));
+  fill(node, bar, loadingNote());
 
   let offset = 0;
   let total = 0;
+  let empty = false;
   const grid = el('div', { class: 'artist-grid' });
   const footer = el('div', { class: 'row pagination' });
 
@@ -711,18 +771,22 @@ async function renderArtistsInto(node) {
     more.disabled = true;
     let data;
     try {
-      data = await api(`/api/web/artists?limit=${PAGE_SIZE}&offset=${offset}`);
+      data = await api(`/api/web/artists?limit=${PAGE_SIZE}&offset=${offset}${letterQuery(letter)}`);
     } catch (error) {
       more.disabled = false;
       toast(error.message, 'error');
       return;
     }
+    if (!isCurrent()) return;
     const items = data.items || [];
     total = data.total ?? items.length;
     offset += items.length;
 
     if (!items.length && offset === 0) {
-      fill(node, el('p', { class: 'muted' }, 'Исполнителей нет'));
+      empty = true;
+      fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
+        ? `Нет исполнителей на «${letter}»`
+        : 'Исполнителей нет'));
       return;
     }
 
@@ -733,8 +797,7 @@ async function renderArtistsInto(node) {
     },
       artistAvatar(artist),
       el('span', { class: 'artist-name' }, artist.name),
-      // Исполнитель без альбома (только треки, например гость или одиночный трек):
-      // подпись «N тр.» вместо «0 альб.», чтобы не выглядело как пустая плитка.
+      // Без альбомов показываем число треков, чтобы плитка не выглядела пустой.
       el('span', { class: 'artist-meta' },
         artist.album_count ? `${artist.album_count} альб.` : `${artist.track_count ?? 0} тр.`),
     )));
@@ -748,7 +811,8 @@ async function renderArtistsInto(node) {
   }
 
   await loadPage();
-  fill(node, grid, footer);
+  if (!isCurrent() || empty) return;
+  fill(node, bar, grid, footer);
 }
 
 async function openArtist(artistId) {
@@ -818,10 +882,17 @@ async function openAlbum(albumId) {
     ),
   );
 
+  // Крошка «Альбомы» ведёт к альбомам этого исполнителя, а не в общий список:
+  // со страницы альбома ожидается окружение исполнителя, а не вся библиотека.
+  // У альбома без artist_id вести некуда — тогда общий список.
+  const albumsCrumb = album.artist_id
+    ? () => openArtist(album.artist_id)
+    : () => switchLibraryTab('albums');
+
   fill($('#view'),
     breadcrumbs([
       { label: 'Библиотека', view: 'library' },
-      { label: 'Альбомы', action: () => switchLibraryTab('albums') },
+      { label: 'Альбомы', action: albumsCrumb },
       { label: album.name, current: true },
     ]),
     hero,
@@ -1295,14 +1366,21 @@ async function renderPlaylists(view) {
 }
 
 async function renderPlaylistsInto(node) {
-  // Тот же список, но компактно, внутри «Библиотеки».
-  const data = await api('/api/web/playlists');
+  const isCurrent = beginRender(node);
+  const letter = state.letters.playlists;
+  const bar = alphabetBar(letter, (picked) => pickLetter('playlists', picked));
+  fill(node, bar, loadingNote());
+
+  const data = await api(`/api/web/playlists${letter ? `?letter=${encodeURIComponent(letter)}` : ''}`);
+  if (!isCurrent()) return;
   const items = data.items || [];
   if (!items.length) {
-    node.replaceChildren(el('p', { class: 'muted' }, 'Плейлистов пока нет'));
+    fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
+      ? `Нет плейлистов на «${letter}»`
+      : 'Плейлистов пока нет'));
     return;
   }
-  node.replaceChildren(el('div', { class: 'pl-list' },
+  fill(node, bar, el('div', { class: 'pl-list' },
     ...items.map((playlist) => el('button', {
       class: 'pl-item',
       onclick: () => { selectedPlaylistId = playlist.id; setView('playlists'); },
@@ -1486,6 +1564,8 @@ async function renderSettings(view) {
         toast('Настройки сохранены', 'ok');
         // Вид библиотеки применяем сразу, без перезагрузки страницы.
         if (values.library_view) state.libraryView = values.library_view;
+        // Цвет применяем сразу, как и вид библиотеки: перезагружать страницу незачем.
+        if (values.accent_color) applyAccent(values.accent_color);
         setView('settings');
       } catch (error) {
         toast(error.message, 'error');
@@ -1521,10 +1601,19 @@ async function renderSettings(view) {
   );
 }
 
+// Цвет акцента. Тема живёт в theme.css наборами по data-accent на <html>;
+// здесь только переставляем атрибут, чтобы CSS пересчитался без перезагрузки.
+function applyAccent(name) {
+  if (!name) return;
+  document.documentElement.dataset.accent = name;
+}
+
 function choiceLabel(choice) {
   return {
     artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты',
     raw: 'Без перекодирования', flac: 'FLAC', alac: 'ALAC',
+    blue: 'Синий', green: 'Зелёный', violet: 'Фиолетовый', orange: 'Оранжевый',
+    teal: 'Бирюзовый', pink: 'Розовый', red: 'Красный',
     DEBUG: 'DEBUG (подробно)', INFO: 'INFO', WARNING: 'WARNING',
     ERROR: 'ERROR (только ошибки)',
   }[choice] || choice;
@@ -1720,6 +1809,20 @@ function enqueue(tracks, { replace = true } = {}) {
   }
 }
 
+// Строка плеера: текст плюс переход. target — 'artist', 'album' или null (не кликается).
+// null вместо ссылки, а не пустой обработчик: у трека может не быть album_id/artist_id,
+// и тогда кнопка не должна выглядеть нажимаемой.
+function fillNowLine(node, text, target, track) {
+  if (!node) return;
+  const value = text || '';
+  node.textContent = value;
+  node.hidden = !value;
+  node.dataset.target = target || '';
+  node.dataset.albumId = target === 'album' && track.album_id ? String(track.album_id) : '';
+  node.dataset.artistId = target === 'artist' && track.artist_id ? String(track.artist_id) : '';
+  node.disabled = !target || (!node.dataset.albumId && !node.dataset.artistId);
+}
+
 function playIndex(index) {
   if (!state.queue.length) return;
   // Зацикливание: у последнего трека при repeat=off дальше не идём.
@@ -1735,8 +1838,14 @@ function playIndex(index) {
   const audio = $('#audio');
 
   player.hidden = false;
-  $('#now-title').textContent = `${track.title} — ${track.artist || ''}`;
-  $('#now-album').textContent = track.album || '';
+  // Строка около обложки: исполнитель, затем трек, затем альбом. Каждую строку
+  // можно нажать: исполнитель ведёт к его альбомам, трек и альбом — к альбому.
+  // Пустые значения скрываем, чтобы не было пустых кнопок.
+  fillNowLine($('#now-artist'), track.artist, track.artist_id ? 'artist' : null, track);
+  fillNowLine($('#now-title'), track.title, null, track);
+  fillNowLine($('#now-album'), track.album, track.album_id ? 'album' : null, track);
+  $('#cover-now-btn').dataset.albumId = track.album_id ? String(track.album_id) : '';
+  $('#cover-now-btn').disabled = !track.album_id;
   const cover = $('#cover-now');
   cover.src = coverUrl('tr', track.id);
   audio.src = `/stream?id=${track.id}`;
@@ -1820,8 +1929,13 @@ function stopPlayback() {
   state.queueIndex = -1;
   setPlayIcon(false);
   syncNowHeart();
+  $('#now-artist').textContent = '';
   $('#now-title').textContent = '—';
   $('#now-album').textContent = '';
+  $('#now-artist').hidden = true;
+  $('#now-album').hidden = true;
+  $('#cover-now-btn').dataset.albumId = '';
+  $('#cover-now-btn').disabled = true;
   highlightCurrent();
 }
 
@@ -1971,6 +2085,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#cover-now').addEventListener('error', (event) => {
     const node = event.target;
     if (!node.src.endsWith(PLACEHOLDER)) node.src = PLACEHOLDER;
+  });
+
+  // Переходы из плеера. Обложка и название альбома ведут к альбому, исполнитель —
+  // к списку его альбомов. Плеер не перерисовывается: воспроизведение продолжается.
+  $('#cover-now-btn').addEventListener('click', () => {
+    const id = Number($('#cover-now-btn').dataset.albumId);
+    if (id) openAlbum(id);
+  });
+  $('#now-album').addEventListener('click', () => {
+    const id = Number($('#now-album').dataset.albumId);
+    if (id) openAlbum(id);
+  });
+  $('#now-artist').addEventListener('click', () => {
+    const id = Number($('#now-artist').dataset.artistId);
+    if (id) openArtist(id);
   });
 
   const audio = $('#audio');

@@ -22,7 +22,11 @@ from typing import Any
 from app.utils.timeutil import utcnow_iso
 
 # Worker считается живым, если его heartbeat младше этого срока.
-HEARTBEAT_TTL_SEC = 5.0
+# TTL увеличен с 5 до 15 с: в простое статус пишется не чаще раза в
+# HEARTBEAT_WRITE_SEC, и heartbeat не должен казаться устаревшим между записями.
+HEARTBEAT_TTL_SEC = 15.0
+# Период записи heartbeat, когда состояние не меняется.
+HEARTBEAT_WRITE_SEC = 5.0
 # Как часто веб трогает файл активности (чтобы не писать на диск на каждый запрос).
 TOUCH_EVERY_SEC = 1.0
 

@@ -37,6 +37,7 @@ from typing import Any
 
 from app.db.database import Database
 from app.repositories.tracks import TrackRow, _row_to_track
+from app.utils.alphabet import VALID
 from app.utils.timeutil import days_ago_iso, utcnow_iso
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,8 @@ class PlaylistRepository:
         return _row_to_playlist(row) if row else None
 
     async def list_visible(
-        self, user_id: int, *, username: str | None = None
+        self, user_id: int, *, username: str | None = None,
+        letter: str | None = None,
     ) -> list[PlaylistRow]:
         """Плейлисты, видимые пользователю: свои + публичные.
 
@@ -236,6 +238,12 @@ class PlaylistRepository:
         (владелец удалён) видны только если публичные — иначе они
         превратились бы в ничей мусор, к которому есть доступ.
         """
+        # Скобки обязательны: без них AND прилипнет только к is_public.
+        where = "(p.owner_id = ? OR p.is_public = 1)"
+        params: list[object] = [user_id]
+        if letter and letter in VALID:
+            where += " AND mtr_letter(p.name) = ?"
+            params.append(letter)
         rows = await self._db.fetch_all(
             """
             SELECT p.*,
@@ -252,10 +260,10 @@ class PlaylistRepository:
                           WHERE pt.playlist_id = p.id)
                    END AS duration_ms
               FROM playlists p
-             WHERE p.owner_id = ? OR p.is_public = 1
+             WHERE """ + where + """
              ORDER BY p.name COLLATE NOCASE
             """,
-            (user_id,),
+            tuple(params),
         )
         return [_row_to_playlist(row) for row in rows]
 

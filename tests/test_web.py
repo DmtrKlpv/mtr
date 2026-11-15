@@ -384,8 +384,33 @@ async def test_scan_endpoint(web):
 
     status = (await client.get("/api/web/scan/status")).json()["data"]
     assert status["current"]["status"] == "completed"
+    assert status["queued"] is False
     assert status["current"]["seen"] == 3
     assert status["worker"]["alive"] is True
+
+
+async def test_scan_status_reports_queued_command(web):
+    """Команда в очереди видна в статусе: интерфейс должен ждать старта, а не
+    показывать «готов к запуску» и выключать опрос."""
+    from app.worker import ipc
+
+    client, app = web
+    await login_admin(client)
+    ctx = app.state.ctx
+
+    # Worker жив (heartbeat свежий), но команду ещё не забрал.
+    ipc.write_status(ipc.status_path(ctx.settings.data_dir), {"scan": {"status": "idle"}})
+    await ipc.enqueue(ctx.music_db, "scan", {"mode": "incremental"})
+
+    data = (await client.get("/api/web/scan/status")).json()["data"]
+    assert data["queued"] is True
+
+    # Команду забрали — флаг снимается.
+    await ctx.music_db.execute(
+        "UPDATE worker_commands SET handled_at = '2026-01-01T00:00:00Z' WHERE kind = 'scan'"
+    )
+    data = (await client.get("/api/web/scan/status")).json()["data"]
+    assert data["queued"] is False
 
 
 # ----------------------------------------------------------------------

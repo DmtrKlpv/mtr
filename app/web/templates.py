@@ -129,10 +129,13 @@ APP_HTML = f"""<!DOCTYPE html>
 
   <footer class="player" id="player" hidden>
     <div class="player-track">
-      <img id="cover-now" class="cover-now" src="/static/placeholder.svg" alt="">
+      <button type="button" id="cover-now-btn" class="cover-now-btn" title="Открыть альбом" aria-label="Открыть альбом">
+        <img id="cover-now" class="cover-now" src="/static/placeholder.svg" alt="">
+      </button>
       <div class="player-meta">
-        <span id="now-title">—</span>
-        <span id="now-album" class="muted small"></span>
+        <button type="button" id="now-artist" class="player-line player-artist" title="Все альбомы исполнителя">—</button>
+        <button type="button" id="now-title" class="player-line player-song" title="">—</button>
+        <button type="button" id="now-album" class="player-line player-album muted" title="Открыть альбом"></button>
       </div>
     </div>
 
@@ -227,13 +230,20 @@ def render_setup() -> str:
     return SETUP_HTML
 
 
-def render_app(username: str, role: str, csrf: str) -> str:
+def render_app(username: str, role: str, csrf: str, accent: str = "blue") -> str:
     """Оболочка приложения с внедрёнными данными сессии.
 
     Данные передаются через `data-` атрибуты, а не через inline-скрипт:
     CSP без 'unsafe-inline' для script-src это запрещает.
+
+    `accent` ставится на <html>, чтобы выбранный цвет применился при первой
+    отрисовке, без мигания синим по умолчанию.
     """
     return APP_HTML.replace(
+        '<html lang="ru">',
+        f'<html lang="ru" data-accent="{accent}">',
+        1,
+    ).replace(
         '<body>',
         f'<body data-user="{username}" data-role="{role}" data-csrf="{csrf}">',
         1,

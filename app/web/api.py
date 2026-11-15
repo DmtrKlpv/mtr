@@ -211,8 +211,11 @@ async def albums(
     session: SessionRecord = Depends(current_session),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
-    rows = await ctx.library.list_albums(limit=limit, offset=offset)
+    """Альбомы страницей. `letter` — рубрика алфавита («0-9», «A»…«Я», «Другие»)."""
+    mark = letter or None
+    rows = await ctx.library.list_albums(limit=limit, offset=offset, letter=mark)
     return _ok(
         {
             "items": [
@@ -227,9 +230,10 @@ async def albums(
             ],
             # Сколько всего: нужно, чтобы интерфейс знал, есть ли следующая
             # страница, и не тянул сразу все 9000 альбомов.
-            "total": await ctx.library.count_albums(),
+            "total": await ctx.library.count_albums(letter=mark),
             "limit": limit,
             "offset": offset,
+            "letter": letter,
         }
     )
 
@@ -262,6 +266,8 @@ async def album_detail(
                     "track_number": track.track_number,
                     # Обложка трека берётся из альбома (al-<id>): только эти ключи кешируются.
                     "album_id": album.id,
+                    # Из плеера по исполнителю переходим к его альбомам.
+                    "artist_id": track.artist_id,
                 }
                 for track in tracks
             ],
@@ -290,6 +296,8 @@ async def search(
                     "artist": track.artist,
                     "album": track.album,
                     "duration": track.duration_sec,
+                    "album_id": track.album_id,
+                    "artist_id": track.artist_id,
                 }
                 for track in tracks
             ],
@@ -415,11 +423,32 @@ async def scan_status(
     """
     status = read_status(status_path(ctx.settings.data_dir))
     alive = worker_alive(status)
+    # Команда скана могла быть поставлена в очередь, но ещё не подхвачена
+    # worker-ом: в простое он просыпается раз в 3 с (IDLE_POLL_SEC). Без этого
+    # флага интерфейс видел «скана нет», выключал опрос и прогресс не появлялся
+    # вовсе, хотя скан уже шёл.
+    queued_scan = False
+    queued_covers = False
+    if alive:
+        rows = await ctx.music_db.fetch_all(
+            "SELECT kind FROM worker_commands WHERE handled_at IS NULL"
+        )
+        for row in rows:
+            if str(row["kind"]) == "scan":
+                queued_scan = True
+            elif str(row["kind"]) == "covers":
+                queued_covers = True
     payload = {
         "current": status.get("scan") or ScanState().as_dict(),
         "covers": status.get("covers") or IDLE_COVERS,
         "watcher": status.get("watcher"),
         "worker": {"alive": alive, "heartbeat": status.get("heartbeat")},
+        # Скан поставлен в очередь и ещё не начался: интерфейс должен опрашивать
+        # дальше, а не показывать «готов к запуску».
+        "queued": queued_scan,
+        # Пересборка обложек в очереди: интерфейсу тоже нужно ждать её старта,
+        # иначе прогресс обложек не появится (та же причина, что у скана).
+        "queued_covers": queued_covers,
         "last_run": None,
     }
     row = await ctx.music_db.fetch_one(
@@ -481,8 +510,9 @@ async def scan_history(
 async def list_playlists(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
+    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
-    rows = await ctx.playlists.list_visible(session.user.id)
+    rows = await ctx.playlists.list_visible(session.user.id, letter=letter or None)
     return _ok(
         {
             "items": [
@@ -495,7 +525,9 @@ async def list_playlists(
                     "owner_id": playlist.owner_id,
                 }
                 for playlist in rows
-            ]
+            ],
+            "total": len(rows),
+            "letter": letter,
         }
     )
 
@@ -793,6 +825,27 @@ async def warm_covers(
     return _ok({"queued": True}, status_code=202)
 
 
+@router.post("/covers/rebuild-from-folders")
+async def rebuild_covers_from_folders(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(admin_csrf),
+) -> JSONResponse:
+    """Сбрасывает кеш обложек у альбомов, где в папке есть картинка.
+
+    Нужно после включения настройки `cover_prefer_folder_image`: у уже
+    посчитанных альбомов в кеше лежит картинка из тегов и сама не заменится.
+
+    Выполняется worker-ом, а не здесь: чтение каталогов тысяч альбомов на NAS
+    заняло бы минуты и подвесило бы веб-процесс. Здесь только постановка в
+    очередь, как у обычного скана.
+    """
+    unavailable = await _no_worker(ctx)
+    if unavailable is not None:
+        return unavailable
+    await enqueue(ctx.music_db, "covers", {"mode": "rebuild"})
+    return _ok({"queued": True}, status_code=202)
+
+
 @router.post("/covers/purge")
 async def purge_covers(
     ctx: AppContext = Depends(get_ctx),
@@ -862,6 +915,7 @@ def _track_json(track) -> dict:
         "duration": track.duration_sec,
         "track_number": track.track_number,
         "album_id": track.album_id,
+        "artist_id": track.artist_id,
     }
 
 
@@ -1030,9 +1084,11 @@ async def list_artists(
     session: SessionRecord = Depends(current_session),
     limit: int = Query(60, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
     """Исполнители страницей. Пустые (без альбомов) отфильтрованы в SQL."""
-    rows = await ctx.library.list_artists(limit=limit, offset=offset)
+    mark = letter or None
+    rows = await ctx.library.list_artists(limit=limit, offset=offset, letter=mark)
     # Обложки исполнителей в схеме нет, аватар берёт картинку первого
     # альбома. Раньше это был отдельный запрос на каждого исполнителя —
     # на 5000 записей выходило 5000 обращений; теперь один запрос на страницу.
@@ -1050,9 +1106,10 @@ async def list_artists(
                 }
                 for artist in rows
             ],
-            "total": await ctx.library.count_artists(),
+            "total": await ctx.library.count_artists(letter=mark),
             "limit": limit,
             "offset": offset,
+            "letter": letter,
         }
     )
 
@@ -1238,6 +1295,7 @@ async def _build_plans(
     Возвращает (планы, предупреждения, параметры). Ничего не пишет в БД.
     """
     from app.playlists import importer
+    from app.playlists.matching import TrackIndex
 
     settings = await ctx.settings_repo.effective()
     raw_dir = (dir_override if dir_override is not None
@@ -1261,27 +1319,32 @@ async def _build_plans(
             _import_item(str(path), importer.playlist_name(path)) for path in files
         ]
 
+    # Один индекс на весь импорт: сравнение идёт в памяти.
+    track_index = TrackIndex.build(await ctx.tracks.all_live_for_index())
+
     plans = []
-    for index, file_path in enumerate(files):
+    for file_no, file_path in enumerate(files):
         plan = importer.PlaylistPlan(
             path=str(file_path), name=importer.playlist_name(file_path)
         )
         if job is not None:
             job.current = plan.name
-            job.items[index].state = "parsing"
+            job.items[file_no].state = "parsing"
         entries, error = importer.read_playlist(file_path, music_root)
         if error:
             plan.error = error
             plans.append(plan)
             if job is not None:
-                job.items[index].state = "error"
-                job.items[index].error = error
-                job.done = index + 1
+                job.items[file_no].state = "error"
+                job.items[file_no].error = error
+                job.done = file_no + 1
             continue
         plan.total = len(entries)
         if job is not None:
-            job.items[index].state = "matching"
-            job.items[index].total = len(entries)
+            job.items[file_no].state = "matching"
+            job.items[file_no].total = len(entries)
+        # Индекс строится один раз на весь импорт: сравнение по базовому
+        # названию и нормализованному имени файла идёт в памяти.
         matched, unmatched = await importer.match_entries(
             entries,
             music_root=music_root,
@@ -1290,14 +1353,15 @@ async def _build_plans(
             find_by_title=ctx.tracks.find_by_title,
             prefix_from=prefix_from,
             prefix_to=prefix_to,
+            index=track_index,
         )
         plan.resolutions = matched
         plan.unmatched = unmatched
         plans.append(plan)
         if job is not None:
-            job.items[index].state = "done"
-            job.items[index].matched = plan.matched_count
-            job.done = index + 1
+            job.items[file_no].state = "done"
+            job.items[file_no].matched = plan.matched_count
+            job.done = file_no + 1
 
     plans, name_warnings = _dedupe_plans(plans)
     warnings.extend(name_warnings)

@@ -67,4 +67,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # --loop auto и --http auto оставлены намеренно: uvicorn сам выберет
 # uvloop/httptools там, где они установлены, и откатится на asyncio/h11
 # там, где их нет.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4533", "--loop", "auto", "--http", "auto"]
+# --no-access-log: uvicorn иначе пишет строку на каждый HTTP-запрос, включая
+# проверку /healthz каждые 30 с и ping клиентов. Это основной постоянный поток
+# записи в docker logs. Ошибки и предупреждения приложения пишутся как раньше.
+# Чтобы снова видеть запросы, уберите флаг.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4533", "--loop", "auto", "--http", "auto", "--no-access-log"]

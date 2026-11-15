@@ -230,6 +230,7 @@ async def app_page(
             username=session.user.username,
             role=session.user.role,
             csrf=session.csrf_token,
+            accent=getattr(ctx.settings, "accent_color", "blue"),
         )
     )
 

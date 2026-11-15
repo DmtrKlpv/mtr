@@ -24,6 +24,7 @@ from app.covers.service import (
     CoverResolver,
     extract_cover,
     extract_from_directory,
+    folder_image_candidates,
     make_thumbnail,
 )
 from app.db.database import Database
@@ -42,22 +43,27 @@ NEGATIVE_CACHE_LIMIT = 20000
 
 
 def _search_cover_files(
-    paths: list[Path], with_cover: list[Path]
+    paths: list[Path], with_cover: list[Path], prefer_folder_image: bool = True
 ) -> CoverData | None:
     """Ищет обложку среди файлов альбома. Выполняется в рабочем потоке.
 
-    Сначала картинка-файл в каталоге (одно чтение каталога), затем встроенные
-    обложки — только у треков, где это обещает флаг has_cover.
+    `prefer_folder_image=True` (настройка `cover_prefer_folder_image`) — сначала
+    картинка-файл в каталоге альбома, затем встроенные обложки. Иначе порядок
+    обратный: сначала теги, картинка-файл как запасной вариант.
+
+    Каталог берётся у первого трека альбома (по номеру диска и трека): если
+    альбом разложен по нескольким папкам, обложка ищется в первой.
     """
-    if paths:
-        cover = extract_from_directory(paths[0])
-        if cover is not None:
-            return cover
+    directory_cover = extract_from_directory(paths[0]) if paths else None
+    if prefer_folder_image and directory_cover is not None:
+        return directory_cover
     for path in with_cover:
+        # extract_cover по умолчанию ищет сначала в тегах — именно это и нужно
+        # вторым шагом: порядком управляет флаг выше, а не повторный вызов.
         cover = extract_cover(path)
         if cover is not None:
             return cover
-    return None
+    return directory_cover
 
 
 def _is_file(file_path: str) -> bool:
@@ -76,6 +82,8 @@ class CoverRepository:
         # Ограничитель именно для извлечения: чтение с диска не должно
         # занимать event loop и не должно идти сотнями потоков.
         self._semaphore = asyncio.Semaphore(COVER_EXTRACT_CONCURRENCY)
+        # Из настройки cover_prefer_folder_image. Меняется без перезапуска.
+        self.prefer_folder_image = True
         # Отрицательный кеш: ключ -> True. Храним в памяти процесса.
         self._missing: OrderedDict[str, None] = OrderedDict()
 
@@ -178,10 +186,13 @@ class CoverRepository:
         if self._is_known_missing(key):
             return None
 
+        # Без has_cover в сортировке: каталог для поиска картинки берём у
+        # первого трека по порядку, а не у «того, где есть тег». Иначе папка
+        # для поиска обложки зависела бы от тегирования.
         rows = await self._db.fetch_all(
             "SELECT path, has_cover FROM tracks "
             "WHERE album_id = ? AND missing = 0 "
-            "ORDER BY has_cover DESC, disc_number, track_number LIMIT 50",
+            "ORDER BY disc_number, track_number, id LIMIT 50",
             (album_id,),
         )
         if not rows:
@@ -202,7 +213,7 @@ class CoverRepository:
         # ограничитель, чтобы десятки параллельных запросов не забили диск.
         async with self._semaphore:
             cover = await asyncio.to_thread(
-                _search_cover_files, paths, with_cover
+                _search_cover_files, paths, with_cover, self.prefer_folder_image
             )
 
         if cover is None:
@@ -311,7 +322,9 @@ class CoverRepository:
         cover = None
         if not self._is_known_missing(key):
             async with self._semaphore:
-                cover = await asyncio.to_thread(extract_cover, path)
+                cover = await asyncio.to_thread(
+                    extract_cover, path, prefer_folder_image=self.prefer_folder_image
+                )
         if cover is None:
             # У трека своей картинки нет — отдаём обложку альбома,
             # но НЕ кэшируем под ключом трека: иначе при появлении
@@ -324,11 +337,94 @@ class CoverRepository:
         await self.store(key, cover)
         return cover
 
+    async def albums_with_folder_image(self) -> list[int]:
+        """Альбомы, в каталоге которых есть файл-обложка.
+
+        Каталог берётся у первого трека альбома — тому же правилу следует и
+        обычный поиск обложки, иначе «есть ли картинка» отвечалось бы по-разному.
+        Чтение каталогов идёт в рабочем потоке с ограничителем: альбомов могут
+        быть тысячи, а диск на NAS медленный.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT album_id, path FROM tracks "
+            "WHERE missing = 0 AND album_id IS NOT NULL "
+            "ORDER BY album_id, disc_number, track_number, id"
+        )
+        seen: set[int] = set()
+        first_paths: list[tuple[int, Path]] = []
+        for row in rows:
+            album_id = int(row["album_id"])
+            if album_id in seen:
+                continue
+            path = Path(str(row["path"]))
+            if not self._resolver.is_inside_music(path):
+                continue
+            seen.add(album_id)
+            first_paths.append((album_id, path))
+
+        found: list[int] = []
+        semaphore = asyncio.Semaphore(COVER_EXTRACT_CONCURRENCY)
+
+        async def check(album_id: int, path: Path) -> None:
+            async with semaphore:
+                images = await asyncio.to_thread(folder_image_candidates, path)
+            if images:
+                found.append(album_id)
+
+        await asyncio.gather(*(check(a, p) for a, p in first_paths))
+        return sorted(found)
+
+    async def rebuild_from_folders(self) -> dict[str, int]:
+        """Сбрасывает кеш обложек у альбомов, где в папке есть картинка.
+
+        Кеш остальных альбомов не трогаем: пересборка там ничего не изменит,
+        а стоит чтения диска. Ключи `tr-<id>` сбрасываются только для треков
+        затронутых альбомов — у остальных могла быть своя встроенная картинка,
+        и она остаётся верной.
+        """
+        album_ids = await self.albums_with_folder_image()
+        track_keys: list[str] = []
+        for album_id in album_ids:
+            await self.invalidate_album(album_id)
+            rows = await self._db.fetch_all(
+                "SELECT id FROM tracks WHERE album_id = ? AND missing = 0",
+                (album_id,),
+            )
+            track_keys.extend(f"tr-{int(row['id'])}" for row in rows)
+        for chunk_start in range(0, len(track_keys), 500):
+            chunk = track_keys[chunk_start:chunk_start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            await self._db.execute(
+                f"DELETE FROM cover_cache WHERE key IN ({placeholders})", tuple(chunk)
+            )
+        self.forget_missing()
+        return {"albums": len(album_ids), "tracks": len(track_keys)}
+
     async def invalidate_album(self, album_id: int) -> None:
         """Сбрасывает кэш альбома (вызывается при изменении тегов)."""
         key = f"al-{album_id}"
         self._missing.pop(key, None)
+        rows = await self._db.fetch_all(
+            "SELECT file_path FROM cover_cache WHERE key = ?", (key,)
+        )
         await self._db.execute("DELETE FROM cover_cache WHERE key = ?", (key,))
+        # Файл превью тоже: иначе он останется на диске мусором, а имя содержит
+        # хэш содержимого и уже не совпадёт с новой картинкой.
+        base = self._resolver.covers_dir.resolve()
+        for row in rows:
+            raw = str(row["file_path"] or "")
+            if not raw:
+                continue
+            candidate = (base / raw.split("/")[-1]).resolve()
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                continue
+            try:
+                if candidate.is_file():
+                    candidate.unlink()
+            except OSError:
+                continue
 
     # ------------------------------------------------------------------
     # Маркер «обложки нет» и прогрев

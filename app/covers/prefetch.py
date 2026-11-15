@@ -58,6 +58,8 @@ class CoverPass:
         self._task: asyncio.Task | None = None
         self._cancel = False
         self._restart = False
+        # Режим отложенного перезапуска: rebuild не затирается более поздним incremental.
+        self._restart_mode = "incremental"
         self.state = "idle"        # idle | running | done | cancelled | error
         self.total = 0
         self.done = 0
@@ -91,18 +93,32 @@ class CoverPass:
         """
         if self.running:
             self._restart = True
+            if mode == "rebuild" or self._restart_mode != "rebuild":
+                self._restart_mode = mode
             return False
         self._cancel = False
         self._restart = False
+        self._restart_mode = "incremental"
+        self._spawn(mode)
+        return True
+
+    def _spawn(self, mode: str) -> None:
+        """Создаёт задачу фазы, не проверяя `running`.
+
+        Отдельно от `start`, потому что перезапуск из блока `finally` идёт,
+        пока текущая задача ещё не завершена: `start` в этот момент видел
+        `running == True` и вместо запуска снова ставил флаг перезапуска,
+        то есть перезапуск терялся.
+        """
         self._task = asyncio.get_running_loop().create_task(
             self._run(mode), name="mtr-cover-pass",
         )
-        return True
 
     def cancel_nowait(self) -> None:
         """Просит остановиться после текущего альбома. Не ждёт."""
         self._cancel = True
         self._restart = False
+        self._restart_mode = "incremental"
 
     async def stop(self) -> None:
         """Остановка при выключении сервера."""
@@ -122,6 +138,15 @@ class CoverPass:
         self._started = time.monotonic()
         self._finished = None
         try:
+            if mode == "rebuild":
+                # Обход каталогов в фоне: цикл worker-а при этом продолжает писать heartbeat.
+                result = await self._covers.rebuild_from_folders()
+                logger.info(
+                    "пересборка обложек из папок — альбомов %d, треков %d",
+                    result["albums"], result["tracks"],
+                )
+                # Дальше — обычный инкрементальный проход: он и заполнит кеш.
+                mode = "incremental"
             if mode == "full":
                 cleared = await self._covers.clear_absent_markers()
                 logger.info("полный скан: снято маркеров отсутствия обложек: %d", cleared)
@@ -151,8 +176,10 @@ class CoverPass:
             self._finished = time.monotonic()
             self._log_summary()
             if self._restart and not self._cancel:
+                mode = self._restart_mode
                 self._restart = False
-                self.start("incremental")
+                self._restart_mode = "incremental"
+                self._spawn(mode)
 
     async def _wait_for_quiet(self) -> None:
         """Ждёт, пока пользователь не перестанет листать (не дольше MAX_WAIT_SEC).

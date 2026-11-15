@@ -18,9 +18,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mtr-app:0.23.9
+    image: mtr-app:0.24.9
     container_name: mtr-app
     restart: unless-stopped
+    # Ротация логов: без лимита json-file растёт бесконечно и держит диск в работе.
+    # Максимум ~30 МБ на контейнер (3 файла по 10 МБ), старые записи удаляются.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "4533:4533"
     volumes:

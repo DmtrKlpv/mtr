@@ -107,6 +107,21 @@ SPECS: dict[str, SettingSpec] = {
              "чтобы не остановиться совсем. Применяется сразу.",
         minimum=5, maximum=600,
     ),
+    "cover_prefer_folder_image": SettingSpec(
+        key="cover_prefer_folder_image", kind="bool", default=True,
+        label="Обложка: сначала файл в папке",
+        help="Брать обложку из файла рядом с треками (cover, folder, front, orig, pic "
+             "в любом регистре; jpg, jpeg, jfif, png, webp), а не из тегов аудиофайла. "
+             "Если файла нет — как раньше, из тегов. Применяется к новым обложкам: "
+             "готовые пересобирает кнопка «Пересобрать обложки из папок».",
+    ),
+    "accent_color": SettingSpec(
+        key="accent_color", kind="choice", default="blue",
+        label="Оформление: цвет акцента",
+        help="Цвет кнопок, активного пункта меню, полосы прогресса и подсветки играющего трека. "
+             "Применяется сразу, без перезагрузки страницы.",
+        choices=("blue", "green", "violet", "orange", "teal", "pink", "red"),
+    ),
     "scan_batch_tracks": SettingSpec(
         key="scan_batch_tracks", kind="int", default=0,
         label="Разбивать скан по треков",

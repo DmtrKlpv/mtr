@@ -289,13 +289,16 @@ class TrackRepository:
         # (ESCAPE '\\' съедает следующий символ). Порядок замен важен: сначала "\\".
         escaped = cleaned.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
         like = f"%{escaped}%"
+        # mtr_fold с обеих сторон: без учёта регистра и без разницы е/ё.
+        # Обычный LIKE в SQLite регистрозависим для кириллицы, поэтому «Ёлка»
+        # не находилась по запросу «елка», а «QUEEN» — по «queen».
         rows = await self._db.fetch_all(
             """
             SELECT * FROM tracks
              WHERE missing = 0
-               AND (title  LIKE ? ESCAPE '\\'
-                 OR artist LIKE ? ESCAPE '\\'
-                 OR album  LIKE ? ESCAPE '\\')
+               AND (mtr_fold(title)  LIKE mtr_fold(?) ESCAPE '\\'
+                 OR mtr_fold(artist) LIKE mtr_fold(?) ESCAPE '\\'
+                 OR mtr_fold(album)  LIKE mtr_fold(?) ESCAPE '\\')
              ORDER BY title COLLATE NOCASE
              LIMIT ?
             """,
@@ -591,6 +594,19 @@ class TrackRepository:
             "SELECT * FROM tracks WHERE path = ? AND missing = 0", (path,)
         )
         return None if row is None else _row_to_track(row)
+
+    async def all_live_for_index(self) -> list[dict[str, object]]:
+        """Все живые треки минимальным набором полей — для индекса сопоставления.
+
+        Нужен построителю `app.playlists.matching.TrackIndex`: сравнение по
+        базовому названию и нормализованному имени файла делается в памяти,
+        иначе на 38 000 треков это были бы десятки тысяч запросов.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT id, path, filename, title, artist, album, album_id, "
+            "duration_ms, missing FROM tracks WHERE missing = 0"
+        )
+        return [dict(row) for row in rows]
 
     async def find_by_filename(self, filename: str, *, limit: int = 5) -> list[TrackRow]:
         """Треки с таким именем файла.

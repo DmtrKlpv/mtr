@@ -93,6 +93,13 @@ class Settings:
     log_level: str = "INFO"
     # Сколько файлов разбирать параллельно при сканировании.
     scan_concurrency: int = 4
+    # Обложка: сначала картинка из каталога альбома (cover.jpg, folder.png,
+    # front, orig, pic в любом регистре), и только потом — картинка из тегов
+    # аудиофайла. Выключено — прежний порядок (сначала теги).
+    cover_prefer_folder_image: bool = True
+    # Цвет акцента интерфейса. Значение — имя пресета из static/theme.css;
+    # сам цвет живёт в CSS, здесь только выбор.
+    accent_color: str = "blue"
 
     @classmethod
     def from_env(cls) -> "Settings":

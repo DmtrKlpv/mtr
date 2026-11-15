@@ -95,6 +95,11 @@ class AppContext:
             music_db,
             CoverResolver(settings.covers_dir, settings.music_dir),
         )
+        # Порядок «файл в папке или теги» приходит из настройки; здесь — стартовое
+        # значение, дальше его обновляет _refresh_runtime_settings.
+        covers_repo.prefer_folder_image = bool(
+            getattr(settings, "cover_prefer_folder_image", True)
+        )
         limiter = TranscodeLimiter(settings.max_transcodes)
         stream_service = StreamService(tracks_repo, limiter)
         scan_state = ScanState()
@@ -224,4 +229,9 @@ async def apply_runtime_settings(
     # Параллельность разбора — состояние сканера, а не конфига.
     if "scan_concurrency" in changes:
         ctx.scanner.set_parse_concurrency(changes["scan_concurrency"])
+    # Порядок источников обложки: действует на новые обложки, без перезапуска.
+    if "cover_prefer_folder_image" in changes:
+        ctx.covers.prefer_folder_image = bool(
+            changes["cover_prefer_folder_image"]
+        )
     return applied

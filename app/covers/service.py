@@ -31,16 +31,26 @@ from typing import Final
 logger = logging.getLogger(__name__)
 
 # Имена файлов-обложек в каталоге альбома, по убыванию приоритета.
-COVER_FILENAMES: Final[tuple[str, ...]] = (
-    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
-    "folder.jpg", "folder.jpeg", "folder.png",
-    "front.jpg", "front.jpeg", "front.png",
-    "album.jpg", "album.png", "albumartsmall.jpg",
+#
+# Сравниваются БЕЗ учёта регистра и БЕЗ расширения: в библиотеках встречаются
+# и `Cover.JPG`, и `folder.png`, и `FRONT.JPEG`. Раньше список был точных имён
+# и на Linux (регистрозависимая ФС) `Cover.jpg` не находился вовсе.
+#
+# `orig` и `pic` — из старых каталогизаторов и рипов; в конце списка, чтобы не
+# перебивать явные `cover`/`folder`.
+COVER_BASENAMES: Final[tuple[str, ...]] = (
+    "cover", "folder", "front", "orig", "pic", "album", "albumartsmall",
+)
+
+# Расширения картинок, которые имеет смысл брать как обложку.
+# .jfif — это JPEG с другим расширением (так сохраняет часть софта).
+COVER_SUFFIXES: Final[tuple[str, ...]] = (
+    ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif",
 )
 
 # MIME по расширению. Отдаём только то, что браузеры показывают без плагинов.
 MIME_BY_EXT: Final[dict[str, str]] = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
     ".png": "image/png", ".webp": "image/webp",
     ".gif": "image/gif",
 }
@@ -326,31 +336,92 @@ def extract_embedded(path: Path) -> CoverData | None:
         return None
 
 
-def extract_from_directory(track_path: Path) -> CoverData | None:
-    """Ищет файл-обложку рядом с треком и в каталоге альбома."""
-    for directory in (track_path.parent, track_path.parent.parent):
-        if not directory.is_dir():
+def _split_name(name: str) -> tuple[str, str]:
+    base, suffix = os.path.splitext(name.lower())
+    return base, suffix
+
+
+def is_cover_filename(name: str) -> bool:
+    """Похоже ли имя на обложку: `Cover.JPG`, `folder.png`, `orig.jpeg`.
+
+    Регистр не важен. Раньше список был точных имён, и на регистрозависимом
+    Linux-томе `Cover.jpg` не находился вовсе.
+    """
+    base, suffix = _split_name(name)
+    return suffix in COVER_SUFFIXES and base in COVER_BASENAMES
+
+
+def find_folder_images(directory: Path) -> list[Path]:
+    """Файлы-обложки каталога в порядке предпочтения.
+
+    Сначала по имени (`cover` важнее `pic`), затем по размеру (крупный файл
+    обычно настоящая обложка, а не превью), затем по имени. Порядок не зависит
+    от выдачи каталога, и обложка не «прыгает» между проходами.
+    """
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return []
+    found: list[tuple[tuple[int, int, str], Path]] = []
+    for entry in entries:
+        try:
+            if not entry.is_file() or not is_cover_filename(entry.name):
+                continue
+            size = entry.stat().st_size
+        except OSError:
             continue
-        for name in COVER_FILENAMES:
-            candidate = directory / name
-            try:
-                if not candidate.is_file():
-                    continue
-                if candidate.stat().st_size > MAX_COVER_BYTES:
-                    logger.warning("обложка слишком велика: %s", candidate)
-                    continue
-                data = candidate.read_bytes()
-            except OSError:
-                continue
-            if not data:
-                continue
-            mime = MIME_BY_EXT.get(candidate.suffix.lower()) or _mime_of(data)
-            return CoverData(data, mime, f"file:{candidate.name}")
+        if size <= 0:
+            continue
+        if size > MAX_COVER_BYTES:
+            logger.warning("обложка слишком велика: %s", entry.path)
+            continue
+        base, _ = _split_name(entry.name)
+        rank = COVER_BASENAMES.index(base)
+        found.append(((rank, -size, entry.name.lower()), Path(entry.path)))
+    found.sort(key=lambda item: item[0])
+    return [path for _, path in found]
+
+
+def _read_cover_file(candidate: Path) -> CoverData | None:
+    try:
+        data = candidate.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    mime = MIME_BY_EXT.get(candidate.suffix.lower()) or _mime_of(data)
+    return CoverData(data, mime, f"file:{candidate.name}")
+
+
+def folder_image_candidates(track_path: Path) -> list[Path]:
+    """Картинки-обложки трека по приоритету: каталог трека, затем родительский."""
+    result: list[Path] = []
+    for directory in (track_path.parent, track_path.parent.parent):
+        if directory.is_dir():
+            result.extend(find_folder_images(directory))
+    return result
+
+
+def extract_from_directory(track_path: Path) -> CoverData | None:
+    """Ищет файл-обложку в каталоге трека."""
+    for candidate in folder_image_candidates(track_path):
+        cover = _read_cover_file(candidate)
+        if cover is not None:
+            return cover
     return None
 
 
-def extract_cover(track_path: Path) -> CoverData | None:
-    """Полный поиск: встроенная обложка, затем файл рядом."""
+def extract_cover(
+    track_path: Path, *, prefer_folder_image: bool = False
+) -> CoverData | None:
+    """Полный поиск обложки для трека.
+
+    `prefer_folder_image=True` — сначала файл в каталоге (обычно `cover.jpg`),
+    только потом встроенная в теги картинка. Флаг приходит из настройки
+    `cover_prefer_folder_image`.
+    """
+    if prefer_folder_image:
+        return extract_from_directory(track_path) or extract_embedded(track_path)
     return extract_embedded(track_path) or extract_from_directory(track_path)
 
 

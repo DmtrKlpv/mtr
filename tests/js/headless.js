@@ -154,8 +154,10 @@ nodeFor('#view');
 
 const ALBUM = { id: 1, name: 'Opera', artist: 'Queen', year: 1975, song_count: 2 };
 const TRACKS = [
-  { id: 1, title: 'Bohemian', artist: 'Queen', album: 'Opera', duration: 355, track_number: 1 },
-  { id: 2, title: 'Love', artist: 'Queen', album: 'Opera', duration: 200, track_number: 2 },
+  { id: 1, title: 'Bohemian', artist: 'Queen', album: 'Opera', duration: 355, track_number: 1,
+    album_id: 1, artist_id: 1 },
+  { id: 2, title: 'Love', artist: 'Queen', album: 'Opera', duration: 200, track_number: 2,
+    album_id: 1, artist_id: 1 },
 ];
 
 const FIXTURES = {
@@ -166,7 +168,7 @@ const FIXTURES = {
   '/api/web/stats': { ok: true, data: { tracks: 3, albums: 2, artists: 2, users: 1 } },
   '/api/web/playlists': { ok: true, data: { items: [{ id: 1, name: 'Test', song_count: 2, is_public: false, is_smart: false, owner_id: 1 }] } },
   '/api/web/playlists/1': { ok: true, data: { id: 1, name: 'Test', is_public: false, is_smart: false, can_edit: true, tracks: TRACKS } },
-  '/api/web/albums/1': { ok: true, data: { id: 1, name: 'Opera', artist: 'Queen', year: 1975, tracks: TRACKS } },
+  '/api/web/albums/1': { ok: true, data: { id: 1, name: 'Opera', artist: 'Queen', artist_id: 1, year: 1975, tracks: TRACKS } },
   '/api/web/users': { ok: true, data: { items: [] } },
   '/api/web/settings': { ok: true, data: { items: [
     { key: 'library_view', kind: 'choice', label: 'Вид библиотеки по умолчанию', help: 'h', choices: ['artists', 'albums', 'playlists'], value: 'albums', default: 'albums', overridden: false },
@@ -178,6 +180,7 @@ const FIXTURES = {
   '/api/web/starred-ids': { ok: true, data: { ids: [1] } },
   '/api/web/tracks/1/star': { ok: true, data: { id: 1, starred: false } },
   '/api/web/scan': { ok: true, data: { seen: 3, added: 0 } },
+  '/api/web/scan/history': { ok: true, data: { items: [] } },
   '/api/web/settings/reset': { ok: true, data: { reset: 'library_view' } },
 };
 
@@ -212,6 +215,12 @@ const localStorageStub = (() => {
   };
 })();
 
+// Опрос статуса скана — setInterval. Подменяем таймеры, чтобы тест дёргал тики сам.
+const timers = new Map();
+let timerSeq = 0;
+const fakeSetInterval = (fn) => { timerSeq += 1; timers.set(timerSeq, fn); return timerSeq; };
+const fakeClearInterval = (id) => { timers.delete(id); };
+
 const sandbox = {
   document: document_,
   localStorage: localStorageStub,
@@ -219,6 +228,7 @@ const sandbox = {
   window: { location: { href: '/app' } },
   fetch: fetch_,
   console, setTimeout, clearTimeout,
+  setInterval: fakeSetInterval, clearInterval: fakeClearInterval,
   Promise, Object, Array, JSON, String, Number, Boolean, Math, Date, Set, Map, Error,
   confirm: () => true,
   prompt: () => '1',
@@ -331,6 +341,37 @@ const viewText = () => textOf(nodeFor('#view'));
     if (sandbox.state.queueIndex !== 0) throw new Error('индекс=' + sandbox.state.queueIndex);
   });
 
+  await check('плеер: строки идут в порядке исполнитель, трек, альбом', () => {
+    sandbox.playIndex(0);
+    const artist = nodeFor('#now-artist');
+    const title = nodeFor('#now-title');
+    const album = nodeFor('#now-album');
+    if (artist.textContent !== 'Queen') throw new Error('исполнитель=' + artist.textContent);
+    if (title.textContent !== 'Bohemian') throw new Error('трек=' + title.textContent);
+    if (album.textContent !== 'Opera') throw new Error('альбом=' + album.textContent);
+    // Раньше в одной строке склеивалось «трек — исполнитель».
+    if (title.textContent.includes('—')) throw new Error('в названии остался разделитель');
+  });
+
+  await check('плеер: обложка и альбом ведут к альбому, исполнитель — к его альбомам', async () => {
+    sandbox.playIndex(0);
+    const before = calls.length;
+
+    await nodeFor('#cover-now-btn').listeners.click[0]();
+    if (!calls.slice(before).some((c) => c.key === '/api/web/albums/1'))
+      throw new Error('обложка не открыла альбом');
+
+    const mid = calls.length;
+    await nodeFor('#now-album').listeners.click[0]();
+    if (!calls.slice(mid).some((c) => c.key === '/api/web/albums/1'))
+      throw new Error('название альбома не открыло альбом');
+
+    const later = calls.length;
+    await nodeFor('#now-artist').listeners.click[0]();
+    if (!calls.slice(later).some((c) => c.key === '/api/web/artists/1'))
+      throw new Error('исполнитель не открыл свои альбомы');
+  });
+
   await check('плеер: «следующий» переходит ко второму треку', () => {
     sandbox.nextTrack();
     if (sandbox.state.queueIndex !== 1) throw new Error('индекс=' + sandbox.state.queueIndex);
@@ -383,6 +424,110 @@ const viewText = () => textOf(nodeFor('#view'));
     if (!heart) throw new Error('кнопка избранного (heart) не найдена');
     await heart.listeners.click[0]({ stopPropagation() {} });
     if (!calls.slice(before).some((c) => c.key === '/api/web/tracks/1/star')) throw new Error('запрос не ушёл');
+  });
+
+  await check('импорт: у несопоставленной записи видно папку и папки вариантов', async () => {
+    const box = document_.createElement('div');
+    sandbox.renderPreview(box, {
+      total_files: 1, total_matched: 0, total_unmatched: 1,
+      playlists: [{
+        path: '/music/mix.m3u8', name: 'mix', total: 1, matched: 0,
+        unmatched: 1, existing_id: null,
+        unmatched_items: [{
+          raw_path: '/music/Artist/Album/01 - Renamed.mp3',
+          title: 'My favorite game', artist: 'A, B, C',
+          reason: 'похожие треки — выберите подходящий',
+          candidates: [
+            { track_id: 7, path: '/music/Fallaout boy/Opera/01.mp3',
+              title: 'My favorite game (feat. Idx)', artist: 'Fallaout boy',
+              album: 'Opera', note: 'по названию и первому артисту' },
+          ],
+        }],
+      }],
+    }, '/music');
+    const text = textOf(box);
+    if (!text.includes('/music/Artist/Album'))
+      throw new Error('папка записи не показана: ' + text.slice(0, 200));
+    // Стенд умеет искать только .track и [data-key]: обходим дерево сами.
+    const options = [];
+    const walk = (node) => {
+      if (node.tagName === 'OPTION') options.push(node);
+      (node.children || []).forEach(walk);
+    };
+    walk(box);
+    const option = options.find((o) => String(o.value) === '7');
+    if (!option) throw new Error('вариант не отрисован, найдено option: ' + options.length);
+    if (!textOf(option).includes('/music/Fallaout boy/Opera'))
+      throw new Error('папка варианта не показана: ' + textOf(option));
+    if (option.attributes.title !== '/music/Fallaout boy/Opera/01.mp3')
+      throw new Error('полный путь варианта не в title');
+  });
+
+  await check('скан: опрос после клика не останавливается до старта своего запуска', async () => {
+    const view = nodeFor('#view');
+    const setStatus = (current, queued = false) => {
+      FIXTURES['/api/web/scan/status'] = {
+        ok: true, data: { current, queued, covers: { state: 'idle' } },
+      };
+    };
+    const firstTick = () => [...timers.values()][0];
+    timers.clear();
+    sandbox.state.view = 'scan';
+
+    // Сразу после клика сервер отвечает queued: сервер ещё не начал скан.
+    setStatus({ status: 'completed', started_at: 'OLD' }, true);
+    sandbox.startScanPolling(view);
+    await firstTick()();
+    if (timers.size === 0) throw new Error('опрос остановлен, пока скан стоял в очереди');
+
+    setStatus({ status: 'running', started_at: 'NEW', percent: 40, stage: 'parsing' });
+    await firstTick()();
+    if (timers.size === 0) throw new Error('опрос остановлен во время скана');
+
+    setStatus({ status: 'completed', started_at: 'NEW', percent: 100 });
+    await firstTick()();
+    if (timers.size === 0) throw new Error('опрос остановлен на первом пустом ответе');
+    await firstTick()();
+    if (timers.size !== 0) throw new Error('после завершения скана опрос не остановлен');
+  });
+
+  await check('скан: когда очередь пуста, опрос прекращается', async () => {
+    timers.clear();
+    sandbox.state.view = 'scan';
+    FIXTURES['/api/web/scan/status'] = { ok: true, data: {
+      current: { status: 'completed' }, queued: false, covers: { state: 'idle' } } };
+    sandbox.startScanPolling(nodeFor('#view'));
+    await [...timers.values()][0]();
+    await [...timers.values()][0]();
+    if (timers.size !== 0) throw new Error('опрос не остановлен после завершения скана');
+  });
+
+  await check('скан: окно между очередью и стартом не теряет прогресс', async () => {
+    timers.clear();
+    sandbox.state.view = 'scan';
+    const setStatus = (current, queued) => {
+      FIXTURES['/api/web/scan/status'] = { ok: true, data: {
+        current, queued, covers: { state: 'idle' } } };
+    };
+    const tick = () => [...timers.values()][0];
+
+    setStatus({ status: 'completed', started_at: 'OLD' }, true);
+    sandbox.startScanPolling(nodeFor('#view'));
+    // Команда уже снята из очереди, но worker ещё не записал running.
+    setStatus({ status: 'completed', started_at: 'OLD' }, false);
+    await tick()();
+    if (timers.size === 0) throw new Error('опрос остановлен в окне до старта скана');
+    setStatus({ status: 'running', started_at: 'NEW', percent: 5 }, false);
+    await tick()();
+    if (timers.size === 0) throw new Error('опрос остановлен на старте скана');
+  });
+
+  await check('скан: очередь показывается как «ожидает запуска»', async () => {
+    const state = sandbox.scanViewState({ queued: true, current: { status: 'completed' } });
+    if (state.status !== 'queued') throw new Error('статус=' + state.status);
+    if (state.percent !== 0) throw new Error('percent=' + state.percent);
+    const running = sandbox.scanViewState({ queued: true, current: { status: 'running', percent: 30 } });
+    if (running.status !== 'running') throw new Error('идущий скан перекрыт очередью');
   });
 
   await check('форматирование времени и размера', () => {

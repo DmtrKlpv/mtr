@@ -6,6 +6,21 @@
 /* ---------- Сканирование ---------- */
 let scanPollTimer = null;
 
+function splitPath(value) {
+  const text = String(value || '');
+  const cut = text.lastIndexOf('/');
+  if (cut < 0) return { folder: '', name: text };
+  return { folder: text.slice(0, cut), name: text.slice(cut + 1) };
+}
+
+function candidateLabel(cand) {
+  const parts = [cand.artist || '?', '\u2014', cand.title || ''];
+  if (cand.note) parts.push(`(${cand.note})`);
+  const { folder } = splitPath(cand.path);
+  if (folder) parts.push(`\u00b7 ${folder}`);
+  return parts.join(' ');
+}
+
 /* Таблица ошибок скана: «файл / причина».
 
    Показываем сразу, без раскрывающегося блока: этого просили, и это
@@ -88,6 +103,25 @@ async function renderScan(view) {
         }
       },
     }, 'Пересканировать обложки'),
+    // Сбрасывает кеш только там, где в папке лежит картинка: после включения
+    // настройки «сначала файл в папке» готовые обложки сами не заменятся.
+    el('button', {
+      class: 'ghost',
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          await api('/api/web/covers/rebuild-from-folders', { method: 'POST' });
+          toast('Пересборка обложек запущена', 'ok');
+          // Опрос сразу: команда ещё в очереди, а прогресс должен появиться,
+          // как только worker её подхватит.
+          startScanPolling(view);
+        } catch (error) {
+          toast(error.message, 'error');
+          button.disabled = false;
+        }
+      },
+    }, 'Пересобрать обложки из папок'),
     el('button', {
       class: 'ghost danger',
       onclick: async () => {
@@ -149,7 +183,7 @@ async function renderScan(view) {
   // Если скан уже идёт (запущен из другой вкладки) — подхватываем прогресс.
   updateCoversView(status.covers);
   if (scanIsBusy(status)) {
-    updateScanView(status.current);
+    updateScanView(scanViewState(status));
     startScanPolling(view);
   } else {
     updateScanView(status.last_run
@@ -167,15 +201,16 @@ function stopScanPolling() {
 
 function startScanPolling(view) {
   stopScanPolling();
+  const shouldStop = makesStopper();
   // Опрос раз в секунду: WebSocket может отвалиться, а состояние должно
   // быть свежим. Нагрузка мизерная — один SELECT.
   scanPollTimer = setInterval(async () => {
     try {
       const data = await api('/api/web/scan/status');
       if (state.view !== 'scan') { stopScanPolling(); return; }
-      updateScanView(data.current);
+      updateScanView(scanViewState(data));
       updateCoversView(data.covers);
-      if (!scanIsBusy(data)) {
+      if (shouldStop(scanIsBusy(data))) {
         stopScanPolling();
         renderScan(view);   // финальная перерисовка: история и итоги
       }
@@ -191,7 +226,37 @@ function scanIsBusy(data) {
   if (!data) return false;
   const scanning = Boolean(data.current && data.current.status === 'running');
   const covering = Boolean(data.covers && data.covers.state === 'running');
-  return scanning || covering;
+  // Скан в очереди, но ещё не начат: worker в простое просыпается раз в 3 с,
+  // и без этого флага опрос выключался на первом же «не идёт» — прогресс
+  // не появлялся вообще.
+  const queued = Boolean(data.queued || data.queued_covers);
+  return scanning || covering || queued;
+}
+
+// Между снятием команды из очереди и записью статуса worker-ом проходит
+// мгновение: в этот момент ни «идёт», ни «в очереди» ещё не верно. Опрос
+// поэтому прекращаем только после двух подряд пустых ответов, иначе прогресс
+// терялся в этом окне.
+function makesStopper() {
+  let idleTicks = 0;
+  return (busy) => {
+    if (busy) {
+      idleTicks = 0;
+      return false;
+    }
+    idleTicks += 1;
+    return idleTicks >= 2;
+  };
+}
+
+// Состояние для отрисовки: очередь показываем как «ожидает запуска», а не как
+// результат предыдущего прохода.
+function scanViewState(data) {
+  const current = data.current || { status: 'idle' };
+  if (data.queued && current.status !== 'running') {
+    return { ...current, status: 'queued', percent: 0 };
+  }
+  return current;
 }
 
 // Полоса прогресса обложек. Ids общие для раздела и главной: они никогда
@@ -264,6 +329,7 @@ function updateScanView(current) {
     completed: 'Завершено',
     failed: 'Ошибка',
     cancelled: 'Отменено',
+    queued: 'Ожидает запуска…',
   };
   const pieces = [
     running ? labels.running : `${labels[current.status] || current.status} — ${percent}%`,
@@ -330,7 +396,10 @@ function homeActivityBox() {
 
 function renderHomeActivity(data) {
   const box = document.querySelector('#home-activity');
-  const scanning = Boolean(data.current && data.current.status === 'running');
+  // Скан в очереди тоже считаем работой: иначе панель не покажет ожидание.
+  const scanning = Boolean(
+    (data.current && data.current.status === 'running') || data.queued,
+  );
   // Заглушки списков («Загрузка / Идёт сканирование…») читают это состояние.
   if (typeof state !== 'undefined' && state) {
     state.scanRunning = scanning;
@@ -344,7 +413,7 @@ function renderHomeActivity(data) {
   box.classList.toggle('hidden', !(scanning || covering));
   document.querySelector('#home-scan-block')?.classList.toggle('hidden', !scanning);
   document.querySelector('#home-covers-block')?.classList.toggle('hidden', !covering);
-  if (scanning) updateScanView(data.current);
+  if (scanning) updateScanView(scanViewState(data));
   if (covering) updateCoversView(data.covers);
 }
 
@@ -377,6 +446,7 @@ async function mountHomeActivity() {
 
   let lastSignature = '';
   let lastRefresh = 0;
+  const shouldStop = makesStopper();
   homeScanTimer = setInterval(async () => {
     if (state.view !== 'library') { stopHomeScan(); return; }
     let current;
@@ -398,7 +468,7 @@ async function mountHomeActivity() {
       lastRefresh = now;
       refreshLibraryBody();
     }
-    if (!busy) {
+    if (shouldStop(busy)) {
       stopHomeScan();
       refreshLibraryBody();   // финальный кадр: всё, что успело записаться
     }
@@ -635,13 +705,18 @@ function renderPreview(container, data, dir, jobId = null) {
                 },
               },
                 el('option', { value: '' }, '— не добавлять —'),
+                // Причину совпадения показываем в подписи: иначе список из
+                // похожих строк непонятно чем отличается.
                 ...(item.candidates || []).map((cand) => el('option',
-                  { value: String(cand.track_id) },
-                  `${cand.artist || '?'} — ${cand.title}`)),
+                  { value: String(cand.track_id), title: cand.path },
+                  candidateLabel(cand))),
               );
+              const source = splitPath(item.raw_path);
               return el('div', { class: 'row unmatched-row' },
                 el('div', { class: 'track-main' },
-                  el('span', { class: 'small ellipsis' }, item.raw_path.split('/').pop()),
+                  el('span', { class: 'small ellipsis', title: item.raw_path }, source.name),
+                  el('span', { class: 'muted tiny ellipsis', title: item.raw_path },
+                    source.folder || 'путь не задан'),
                   el('span', { class: 'muted tiny ellipsis' }, item.reason),
                 ),
                 select,

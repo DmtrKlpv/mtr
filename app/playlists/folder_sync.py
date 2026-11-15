@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.db.database import Database
+from app.playlists.matching import MATCH_LABELS, TrackIndex
 from app.repositories.playlists import PlaylistRepository
 from app.scanner.tag_parser import SUPPORTED_EXTENSIONS
 from app.utils.timeutil import utcnow_iso
@@ -473,12 +474,21 @@ class ResyncPlan:
 
 
 def _pick_candidate(
-    entry: dict, hash_hits: list[dict], tag_hits: list[dict], taken: set[int]
+    entry: dict,
+    hash_hits: list[dict],
+    tag_hits: list[dict],
+    taken: set[int],
+    similar: list[tuple[dict, str]] | None = None,
 ) -> tuple[str, dict | None, list[dict]]:
     """Выбирает новый трек для пропавшего. Возвращает (статус, трек, кандидаты).
 
     Статусы: ``relocate`` — однозначно нашли; ``remove`` — кандидатов нет;
     ``ambiguous`` — несколько, и длительность не помогла.
+
+    ``similar`` — варианты, найденные по базовому названию или имени файла
+    (см. `app.playlists.matching`). Они только предлагаются пользователю и
+    НИКОГДА не применяются автоматически: теги разъехались, и угадывать за
+    человека нельзя.
     """
     own_hash = entry.get("content_hash")
     by_hash = [c for c in hash_hits if own_hash and c["content_hash"] == own_hash]
@@ -492,6 +502,14 @@ def _pick_candidate(
         pool[cand["id"]] = cand
     candidates = list(pool.values())
     if not candidates:
+        # Точных совпадений нет. Если есть приблизительные — показываем их,
+        # но не переставляем: статус "ambiguous" означает «не тронуто».
+        usable = [
+            (track, label) for track, label in (similar or ())
+            if int(track.get("id") or 0) != int(entry["track_id"])
+        ]
+        if usable:
+            return "ambiguous", None, [dict(track, match=label) for track, label in usable]
         return "remove", None, []
 
     # Предпочитаем треки, которых ещё нет в плейлисте.
@@ -590,6 +608,12 @@ async def build_resync_plan(
         ]
         hash_hits = await tracks_by_hashes(db, hashes) if hashes else []
         tag_hits = await tracks_by_tags(db, tag_keys) if tag_keys else []
+        # Приблизительный поиск: базовое название без feat и нормализованное имя
+        # файла. Нужен, когда теги разъехались (исполнитель перечислением в
+        # плейлисте, соавторы в названии в библиотеке).
+        similar_index = TrackIndex.build(
+            await db.fetch_all(f"SELECT {_TRACK_COLS} FROM tracks WHERE missing = 0")
+        )
 
         hash_index: dict[str, list[dict]] = {}
         for hit in hash_hits:
@@ -604,8 +628,18 @@ async def build_resync_plan(
             same_tags = tag_index.get(
                 (entry.get("artist"), entry.get("album"), entry.get("title")), []
             )
+            # Сам пропавший трек и треки, уже стоящие в плейлисте, не предлагаем:
+            # инкрементальный скан не помечает удалённый файл отсутствующим, и
+            # запись иначе «находит» себя же.
+            similar = similar_index.suggest(
+                title=entry.get("title"),
+                artist=entry.get("artist"),
+                filename=entry.get("path"),
+                limit=10,
+                exclude=taken | {int(entry["track_id"])},
+            )
             status, target, candidates = _pick_candidate(
-                entry, same_hash, same_tags, taken,
+                entry, same_hash, same_tags, taken, similar,
             )
             base = {
                 "link_id": entry["link_id"],
@@ -628,7 +662,17 @@ async def build_resync_plan(
             else:
                 plan.ambiguous.append({
                     **base,
-                    "candidates": [c["path"] for c in candidates[:10]],
+                    # Причина важна: список «похожих» без неё непонятен.
+                    "candidates": [
+                        {
+                            "track_id": int(c["id"]),
+                            "path": c["path"],
+                            "title": c.get("title"),
+                            "artist": c.get("artist"),
+                            "note": MATCH_LABELS.get(str(c.get("match") or ""), ""),
+                        }
+                        for c in candidates[:10]
+                    ],
                 })
             if job:
                 job.done += 1

@@ -517,6 +517,29 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
 .segment.active { background: var(--accent); color: var(--accentlight); font-weight: 600; }
 .segment.active:hover { background: var(--accent-dark); }
 
+/* ---------- Алфавитный рубрикатор ---------- */
+
+.alpha-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 16px;
+}
+.alpha-btn {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 26px;
+  cursor: pointer;
+}
+.alpha-btn:hover { background: var(--hover); color: var(--text); }
+.alpha-btn.active { background: var(--accent); color: var(--accentlight); font-weight: 600; }
+
 /* ---------- Альбомы ---------- */
 
 .album-grid {
@@ -977,8 +1000,23 @@ label.inline {
 
 .unmatched { margin-top: 10px; }
 .unmatched summary { cursor: pointer; font-size: var(--fs-small); color: var(--accent); }
-.unmatched-row { padding: 4px 0; }
-.unmatched-row select { min-width: 0; flex: 1; }
+.unmatched-row { padding: 4px 0; align-items: flex-start; }
+/* Три строки в левой колонке: имя файла, папка, причина. Без min-width:0
+   длинный путь распирает строку и выдавливает список выбора. */
+.unmatched-row .track-main { min-width: 0; }
+.unmatched-row select {
+  min-width: 0;
+  flex: 1 1 240px;
+  max-width: 46%;
+}
+/* В выпадающем списке подпись варианта содержит путь: обрезаем её, полный
+   путь остаётся в title. Иначе список выбора растягивается под самый
+   длинный вариант. */
+.unmatched-row select option {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ---------- Выпадающий список плейлистов ---------- */
 
@@ -1181,10 +1219,12 @@ label.inline {
   bottom: 0;
   height: var(--player-h);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 2fr) minmax(0, 1fr);
+  /* Левая часть шире: три строки текста (исполнитель, трек, альбом) в одну
+     колонку иначе обрезаются на средней ширине окна. */
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1.5fr) minmax(0, 1fr);
   align-items: center;
-  gap: 16px;
-  padding: 0 20px 0 calc(var(--rail-w) + 8px);
+  gap: 18px;
+  padding: 0 24px 0 calc(var(--rail-w) + 10px);
   background: var(--rail);
   border-top: 1px solid var(--line);
   z-index: 30;
@@ -1205,19 +1245,50 @@ label.inline {
   background: var(--panel-2);
   flex: none;
 }
+/* Обложка — кнопка: сбрасываем вид кнопки, оставляем картинку. */
+.cover-now-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 8px;
+  flex: none;
+  cursor: pointer;
+  line-height: 0;
+}
+.cover-now-btn:disabled { cursor: default; }
+.cover-now-btn:hover:not(:disabled) .cover-now { filter: brightness(1.12); }
+
 .player-meta {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
-.player-meta span {
+
+/* Строки плеера — кнопки, но выглядят как текст. */
+.player-line {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 500;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  line-height: 1.25;
+  cursor: pointer;
 }
+.player-line[hidden] { display: none; }
+.player-line:disabled { cursor: default; }
+.player-line:not(:disabled):hover { color: var(--accent); text-decoration: underline; }
+
+.player-artist { font-size: 12px; color: var(--muted); font-weight: 500; }
+.player-song { font-size: 14px; font-weight: 600; }
+.player-album { font-size: 12px; }
+.player-album:not(:disabled):hover { color: var(--accent); }
 
 .player-center {
   display: flex;
@@ -1289,6 +1360,10 @@ label.inline {
     gap: 8px;
   }
   .player-track { justify-content: center; }
+  /* На телефоне плеер в одну колонку: строки центрируем вместе с обложкой,
+     иначе три разной длины подписи «пляшут» по ширине. */
+  .player-meta { align-items: center; text-align: center; }
+  .player-line { text-align: center; }
   .player-right { justify-content: center; }
   .toast { right: 12px; left: 12px; max-width: none; }
 }
@@ -1341,11 +1416,11 @@ label.inline {
 /* Таблица ошибок скана: файл и причина, видно сразу, без раскрытия.
    Прокрутка ограничена: при массовом сбое строк бывают сотни. */
 .error-table-wrap {
-  margin: 8px 0 4px;
-  /* max-height: 320px;
-  overflow: auto; */
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+    margin: 8px 0 4px;
+    /* max-height: 320px; */
+    /* overflow: auto; */
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
 }
 .error-table {
   width: 100%;

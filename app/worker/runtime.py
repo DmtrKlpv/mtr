@@ -9,12 +9,14 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from app.bootstrap import AppContext
 from app.utils.timeutil import utcnow_iso
 from app.worker.ipc import (
+    HEARTBEAT_WRITE_SEC,
     SCAN_MODES,
     FileActivity,
     stamp_path,
@@ -24,8 +26,14 @@ from app.worker.ipc import (
 
 logger = logging.getLogger(__name__)
 
-# Пауза между проверками очереди команд и публикацией статуса.
+# Пауза между проверками очереди команд и публикацией статуса, когда идёт работа
+# (скан, обложки, команды). Короткая, чтобы старт скана из интерфейса был быстрым.
 POLL_SEC = 0.5
+# Пауза в простое. Раньше было 0.5 с всегда: два запроса к БД и две записи
+# worker_status.json в секунду на NAS, даже без клиентов и без работы.
+IDLE_POLL_SEC = 3.0
+# `rebuild` сбрасывает кеш там, где в папке есть картинка; выполняется в фазе обложек.
+COVER_MODES = ("incremental", "full", "rebuild")
 # Сколько ждать завершения скана при остановке worker-а.
 SHUTDOWN_GRACE_SEC = 30.0
 
@@ -37,12 +45,17 @@ class WorkerRuntime:
         *,
         status_file: Path | None = None,
         poll_sec: float = POLL_SEC,
+        idle_poll_sec: float = IDLE_POLL_SEC,
     ) -> None:
         self.ctx = ctx
         self.status_file = Path(status_file) if status_file else status_path(
             ctx.settings.data_dir
         )
         self.poll_sec = poll_sec
+        self.idle_poll_sec = idle_poll_sec
+        # Последний записанный статус (без heartbeat) и время его записи.
+        self._last_status_sig: str | None = None
+        self._last_status_at: float = float("-inf")
         self._scan_task: asyncio.Task | None = None
         self._scan_tasks: set[asyncio.Task] = set()
         self._activity = FileActivity(stamp_path(ctx.settings.data_dir))
@@ -61,6 +74,12 @@ class WorkerRuntime:
         max_wait = int(values.get("cover_max_wait_sec", 30))
         self._activity.set_window(window)
         self.ctx.cover_pass.set_max_wait(max_wait)
+        # Порядок источников обложки: сначала файл в папке или сначала теги.
+        # Фаза обложек работает в этом процессе, поэтому настройку применяем
+        # здесь, а не только в веб-процессе.
+        self.ctx.covers.prefer_folder_image = bool(
+            values.get("cover_prefer_folder_image", True)
+        )
         # Размер захода сканера: 0 — все сразу.
         batch = int(values.get("scan_batch_tracks", 0) or 0)
         self.ctx.scanner.set_batch_size(batch)
@@ -122,7 +141,8 @@ class WorkerRuntime:
         elif kind == "covers":
             # Пересканирование обложек: полный проход по альбомам без записи в кеше.
             mode = str(payload.get("mode") or "incremental")
-            if mode not in ("full", "incremental"):
+            # Длинная работа (пересборка) идёт в фазе обложек: цикл команд должен писать heartbeat.
+            if mode not in COVER_MODES:
                 mode = "incremental"
             self.ctx.cover_pass.start(mode)
             logger.info("worker: фаза обложек запущена (%s)", mode)
@@ -149,7 +169,24 @@ class WorkerRuntime:
     # ------------------------------------------------------------------
     # Статус
     # ------------------------------------------------------------------
-    async def publish_status(self) -> None:
+    def _is_busy(self) -> bool:
+        """Идёт ли работа, для которой нужен частый опрос."""
+        if self._scan_tasks or self.ctx.scan_state.status == "running":
+            return True
+        if self.ctx.cover_pass.state == "running":
+            return True
+        watcher = self.ctx.watcher
+        return watcher is not None and watcher.pending > 0
+
+    def _next_delay(self, busy: bool) -> float:
+        return self.poll_sec if busy else self.idle_poll_sec
+
+    async def publish_status(self) -> bool:
+        """Пишет статус, если он изменился или пора обновить heartbeat.
+
+        Возвращает True, если файл был записан. В простое запись идёт раз
+        в HEARTBEAT_WRITE_SEC, а не на каждом проходе цикла.
+        """
         watcher = self.ctx.watcher
         payload = {
             "pid": os.getpid(),
@@ -160,8 +197,16 @@ class WorkerRuntime:
                 if watcher is not None else None
             ),
         }
+        signature = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        now = time.monotonic()
+        heartbeat_due = now - self._last_status_at >= HEARTBEAT_WRITE_SEC
+        if signature == self._last_status_sig and not heartbeat_due:
+            return False
         # Файловая запись — блокирующая; на NAS она может занять заметное время.
         await asyncio.to_thread(write_status, self.status_file, payload)
+        self._last_status_sig = signature
+        self._last_status_at = now
+        return True
 
     # ------------------------------------------------------------------
     # Цикл
@@ -173,13 +218,15 @@ class WorkerRuntime:
             if parent_pid is not None and os.getppid() != parent_pid:
                 logger.warning("worker: родительский процесс исчез — завершаюсь")
                 break
+            busy = False
             try:
-                await self.handle_commands()
+                handled = await self.handle_commands()
                 await self.publish_status()
+                busy = handled > 0 or self._is_busy()
             except Exception:  # noqa: BLE001 - цикл переживает разовые сбои БД/диска
                 logger.exception("worker: сбой цикла")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self.poll_sec)
+                await asyncio.wait_for(stop.wait(), timeout=self._next_delay(busy))
             except asyncio.TimeoutError:
                 pass
         await self.shutdown()
