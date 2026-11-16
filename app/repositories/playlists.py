@@ -36,8 +36,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.db.database import Database
+from app.repositories.library import _like
 from app.repositories.tracks import TrackRow, _row_to_track
-from app.utils.alphabet import VALID
 from app.utils.timeutil import days_ago_iso, utcnow_iso
 
 logger = logging.getLogger(__name__)
@@ -210,9 +210,7 @@ class PlaylistRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    # ------------------------------------------------------------------
     # Чтение
-    # ------------------------------------------------------------------
     async def get(self, playlist_id: int) -> PlaylistRow | None:
         row = await self._db.fetch_one(
             """
@@ -230,7 +228,7 @@ class PlaylistRepository:
 
     async def list_visible(
         self, user_id: int, *, username: str | None = None,
-        letter: str | None = None,
+        name_like: str | None = None,
     ) -> list[PlaylistRow]:
         """Плейлисты, видимые пользователю: свои + публичные.
 
@@ -241,9 +239,9 @@ class PlaylistRepository:
         # Скобки обязательны: без них AND прилипнет только к is_public.
         where = "(p.owner_id = ? OR p.is_public = 1)"
         params: list[object] = [user_id]
-        if letter and letter in VALID:
-            where += " AND mtr_letter(p.name) = ?"
-            params.append(letter)
+        if name_like is not None:
+            where += " AND mtr_fold(p.name) LIKE mtr_fold(?) ESCAPE '\\'"
+            params.append(name_like)
         rows = await self._db.fetch_all(
             """
             SELECT p.*,
@@ -266,6 +264,14 @@ class PlaylistRepository:
             tuple(params),
         )
         return [_row_to_playlist(row) for row in rows]
+
+    async def search(
+        self, user_id: int, query: str, *, limit: int = 50
+    ) -> list[PlaylistRow]:
+        like = _like(query)
+        if like is None:
+            return []
+        return (await self.list_visible(user_id, name_like=like))[:limit]
 
     async def tracks(self, playlist: PlaylistRow) -> list[TrackRow]:
         """Треки плейлиста: статического — по позиции, умного — по правилам."""
@@ -332,9 +338,7 @@ class PlaylistRepository:
         rows = await self._db.fetch_all(sql, (*params, limit))
         return [_row_to_track(row) for row in rows]
 
-    # ------------------------------------------------------------------
     # Права
-    # ------------------------------------------------------------------
     @staticmethod
     def can_view(playlist: PlaylistRow, user_id: int) -> bool:
         return playlist.is_public or playlist.owner_id == user_id
@@ -350,9 +354,7 @@ class PlaylistRepository:
             return True
         return is_admin and playlist.is_public
 
-    # ------------------------------------------------------------------
     # Запись
-    # ------------------------------------------------------------------
     async def create(
         self,
         owner_id: int,
@@ -457,9 +459,7 @@ class PlaylistRepository:
             (1 if is_public else 0, utcnow_iso(), playlist_id),
         )
 
-    # ------------------------------------------------------------------
     # Состав
-    # ------------------------------------------------------------------
     async def _replace_tracks(self, playlist_id: int, track_ids: list[int]) -> int:
         """Полностью заменяет состав. Несуществующие треки отбрасываются.
 

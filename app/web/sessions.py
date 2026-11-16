@@ -22,7 +22,6 @@ Cookie: `HttpOnly` (JS не прочитает), `SameSite=Lax` (защита о
 from __future__ import annotations
 
 import hashlib
-import hmac
 import logging
 import secrets
 from dataclasses import dataclass
@@ -79,9 +78,7 @@ class SessionRepository:
         self._db = db
         self._users = users
 
-    # ------------------------------------------------------------------
     # Создание
-    # ------------------------------------------------------------------
     async def create(
         self,
         user_id: int,
@@ -124,9 +121,7 @@ class SessionRepository:
         for session_id in excess:
             await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
-    # ------------------------------------------------------------------
     # Проверка
-    # ------------------------------------------------------------------
     async def resolve(self, token: str | None) -> SessionRecord | None:
         """Возвращает сессию по токену из cookie. None — недействительна."""
         if not token:
@@ -176,15 +171,7 @@ class SessionRepository:
             (utcnow_iso(), session_id),
         )
 
-    def verify_csrf(self, session: SessionRecord, supplied: str | None) -> bool:
-        """Сравнение CSRF-токена за постоянное время."""
-        if not supplied:
-            return False
-        return hmac.compare_digest(session.csrf_token, supplied)
-
-    # ------------------------------------------------------------------
     # Отзыв
-    # ------------------------------------------------------------------
     async def revoke_token(self, token: str) -> None:
         await self._db.execute(
             "DELETE FROM sessions WHERE token_hash = ?", (_hash_token(token),)

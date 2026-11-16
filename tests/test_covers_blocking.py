@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 
-import pytest
 
 from app.repositories import covers as covers_module
 
@@ -67,7 +65,6 @@ async def test_extraction_concurrency_is_limited(ctx, music_dir, monkeypatch):
 
     peak = 0
     current = 0
-    lock = asyncio.Lock()
 
     def slow_cover(path):
         nonlocal peak, current

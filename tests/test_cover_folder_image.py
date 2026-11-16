@@ -45,9 +45,7 @@ async def _album_id(ctx, name: str) -> int:
     ))
 
 
-# ----------------------------------------------------------------------
 # Имена файлов
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize("name", [
     "cover.jpg", "Cover.JPG", "COVER.JPEG", "folder.png", "Folder.PNG",
     "front.jpeg", "Front.JPG", "orig.jpg", "Orig.PNG", "pic.webp",
@@ -70,9 +68,7 @@ def test_all_requested_basenames_present():
         assert base in COVER_BASENAMES
 
 
-# ----------------------------------------------------------------------
 # Выбор файла в каталоге
-# ----------------------------------------------------------------------
 def test_priority_cover_before_folder(music_dir: Path):
     album = music_dir / "A" / "Al"
     track = make_mp3(album / "01.mp3")
@@ -132,9 +128,7 @@ def test_choice_is_stable_between_calls(music_dir: Path):
     assert first == second
 
 
-# ----------------------------------------------------------------------
 # Порядок источников для файла
-# ----------------------------------------------------------------------
 def _track_with_embedded(music_dir: Path) -> Path:
     path = make_mp3(music_dir / "G" / "Al" / "01.mp3", seconds=0.2)
     tag_mp3(path, title="T", artist="A", album="Alb", cover=_image(600))
@@ -163,9 +157,7 @@ def test_embedded_used_when_no_folder_image(music_dir: Path):
     assert cover is not None and not cover.source.startswith("file:")
 
 
-# ----------------------------------------------------------------------
 # Через репозиторий: альбом
-# ----------------------------------------------------------------------
 async def test_album_prefers_folder_image(ctx, music_dir: Path):
     path = make_mp3(music_dir / "H" / "Al" / "01.mp3", seconds=0.2)
     tag_mp3(path, title="T", artist="A", album="AlbH", cover=_image(600))
@@ -227,9 +219,7 @@ def test_nested_artist_covers_album_uses_own_folder(music_dir: Path):
     assert cover is not None and cover.source == "file:folder.jpg"
 
 
-# ----------------------------------------------------------------------
 # Пересборка
-# ----------------------------------------------------------------------
 async def test_rebuild_resets_only_albums_with_folder_image(ctx, music_dir: Path):
     with_file = make_mp3(music_dir / "K" / "Al1" / "01.mp3", seconds=0.2)
     tag_mp3(with_file, title="T", artist="A1", album="AlbK1", cover=_image(600))
@@ -367,9 +357,7 @@ async def test_worker_rebuild_command_switches_to_folder_image(ctx, music_dir: P
     assert after is not None and after.source == "file:cover.jpg"
 
 
-# ----------------------------------------------------------------------
 # HTTP: кнопка и статус
-# ----------------------------------------------------------------------
 async def test_setting_is_visible_and_switchable_via_api(web):  # noqa: F811
     """Настройка есть на странице настроек и переключается из интерфейса."""
     client, app = web

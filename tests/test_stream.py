@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import time
 from pathlib import Path
 
@@ -17,18 +16,15 @@ import pytest
 
 from app.audio.ffmpeg import TranscodeLimiter, TranscodeStream
 from app.audio.profiles import (
-    PROFILES,
     ProfileError,
     build_ffmpeg_argv,
     resolve_plan,
 )
 from app.audio.service import parse_format, parse_offset
-from tests.conftest import FFMPEG, make_flac, make_mp3, make_m4a, tag_mp3
+from tests.conftest import make_flac, make_mp3, tag_mp3
 
 
-# ----------------------------------------------------------------------
 # Чистая логика выбора стратегии (без ffmpeg)
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "src,requested,offset,expected_kind",
     [
@@ -136,9 +132,7 @@ def test_limiter_release_is_safe_to_repeat():
     assert lim.active == 0
 
 
-# ----------------------------------------------------------------------
 # Интеграция с реальным ffmpeg
-# ----------------------------------------------------------------------
 async def _collect(plan_kind: str, path: Path, fmt: str, offset: float) -> bytes:
     plan = resolve_plan(
         source_path=str(path), source_bitrate_kbps=None, requested=fmt, offset_sec=offset
@@ -275,9 +269,7 @@ async def test_cancellation_kills_ffmpeg(music_dir: Path):
     assert limiter.active == 0
 
 
-# ----------------------------------------------------------------------
 # HTTP-уровень
-# ----------------------------------------------------------------------
 # Учётные данные для тестов этапа 2: /stream с этапа 3 требует авторизации.
 STREAM_USER = "streamer"
 STREAM_PASSWORD = "streampass123"

@@ -23,7 +23,7 @@ async def test_search_empty_query_returns_empty(web):
     client, _ = web
     await login_admin(client)
     data = (await client.get("/api/web/search?q=%20%20")).json()["data"]
-    assert data == {"tracks": [], "albums": [], "artists": []}
+    assert data == {"tracks": [], "albums": [], "artists": [], "playlists": []}
 
 
 async def test_search_survives_special_characters(web):
@@ -69,11 +69,9 @@ async def test_tracks_search_does_not_break_on_backslash(ctx):
     assert await tr.search("%", limit=5) == []
 
 
-# ----------------------------------------------------------------------
 # е и ё — одна буква, регистр не важен (0.25.0)
-# ----------------------------------------------------------------------
 def test_fold_unifies_yo_and_register():
-    from app.utils.alphabet import fold
+    from app.utils.fold import fold
 
     assert fold("Ёлка") == fold("елка") == "елка"
     assert fold("ЁЖИК") == fold("ёжик") == "ежик"
@@ -114,9 +112,7 @@ async def test_search_ignores_register_for_cyrillic(ctx, music_dir: Path):
         assert any(t.title == "Ледокол" for t in found), query
 
 
-# ----------------------------------------------------------------------
 # Цвет акцента из настроек (0.25.0)
-# ----------------------------------------------------------------------
 async def test_accent_color_setting_applied_to_page(web):  # noqa: F811
     """Выбранный цвет попадает в data-accent на <html> ещё до загрузки JS."""
     client, app = web
@@ -164,9 +160,7 @@ def test_every_accent_preset_has_css_block():
     assert spec.default in spec.choices
 
 
-# ----------------------------------------------------------------------
 # Плеер: поля для переходов (0.25.0)
-# ----------------------------------------------------------------------
 async def test_album_tracks_carry_artist_and_album_ids(web):  # noqa: F811
     """Из плеера нужны оба id: по обложке и альбому — альбом, по исполнителю — его альбомы."""
     client, _ = web
@@ -188,3 +182,62 @@ async def test_search_tracks_carry_ids(web):  # noqa: F811
     assert data["tracks"], data
     for track in data["tracks"]:
         assert "album_id" in track and "artist_id" in track
+
+
+# Отдельная страница поиска (0.24.11)
+async def test_search_returns_playlists_visible_to_user(web):  # noqa: F811
+    """Свой плейлист находится по имени; чужой приватный — нет."""
+    client, app = web
+    csrf = await login_admin(client)
+    await client.post(
+        "/api/web/playlists",
+        json={"name": "Вечерний джаз"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    data = (await client.get("/api/web/search?q=джаз")).json()["data"]
+    assert [p["name"] for p in data["playlists"]] == ["Вечерний джаз"]
+
+    # Плейлист второго пользователя, закрытый: в поиске админа его быть не должно.
+    from tests.test_web import USER_PASSWORD, login
+
+    other, other_csrf = await login(client, "bob", USER_PASSWORD)
+    assert other.status_code == 200, other.text
+    await client.post(
+        "/api/web/playlists",
+        json={"name": "Секретный джаз боба"},
+        headers={"X-CSRF-Token": other_csrf},
+    )
+    await login_admin(client)  # обратно под админом
+    data = (await client.get("/api/web/search?q=джаз")).json()["data"]
+    assert [p["name"] for p in data["playlists"]] == ["Вечерний джаз"], data["playlists"]
+
+
+async def test_search_by_genre_finds_tracks_and_albums(ctx, music_dir: Path):
+    """Жанр — тег вроде остальных: запрос находит и трек, и его альбом."""
+    from tests.conftest import make_mp3, tag_mp3
+
+    path = make_mp3(music_dir / "Genre" / "Album" / "01.mp3", seconds=0.2)
+    tag_mp3(path, title="Тихая песня", artist="Ктото", album="Пластинка", genre="Shoegaze")
+    await ctx.scanner.scan(mode="full")
+    ctx.cover_pass.cancel_nowait()
+    await ctx.cover_pass.stop()
+
+    tracks = await ctx.tracks.search("shoegaze", with_genre=True)
+    assert [t.title for t in tracks] == ["Тихая песня"]
+
+    albums = await ctx.library.search_albums("shoegaze", with_genre=True)
+    assert [a.name for a in albums] == ["Пластинка"]
+
+    # Без флага жанр не участвует: страница поиска просит его явно.
+    assert await ctx.tracks.search("shoegaze") == []
+
+
+async def test_search_artists_carry_album_fields_for_cards(web):  # noqa: F811
+    """Карточке артиста на странице поиска нужны album_count и album_id."""
+    client, _ = web
+    await login_admin(client)
+    data = (await client.get("/api/web/search?q=Queen")).json()["data"]
+    assert data["artists"], data
+    for artist in data["artists"]:
+        assert artist["album_count"] >= 1
+        assert "album_id" in artist

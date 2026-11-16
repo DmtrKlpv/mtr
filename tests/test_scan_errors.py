@@ -13,9 +13,7 @@ from app.repositories.tracks import ScanCounters, ScanError
 from app.web.api import _scan_errors
 
 
-# ----------------------------------------------------------------------
 # Счётчики
-# ----------------------------------------------------------------------
 def test_add_error_keeps_path_and_reason():
     counters = ScanCounters()
     counters.add_error("/music/a.mp3", "HeaderNotFoundError: can't sync")
@@ -39,9 +37,7 @@ def test_add_error_does_not_grow_without_limit():
     assert len(counters.errors) == MAX_STORED_ERRORS
 
 
-# ----------------------------------------------------------------------
 # Разбор из БД
-# ----------------------------------------------------------------------
 class _Row(dict):
     def keys(self):
         return super().keys()
@@ -93,9 +89,7 @@ def test_broken_json_does_not_crash():
     assert items == []
 
 
-# ----------------------------------------------------------------------
 # Запись в историю
-# ----------------------------------------------------------------------
 async def test_scan_writes_error_objects_to_db(ctx, music_dir: Path):
     (music_dir / "broken.mp3").write_bytes(b"not audio at all")
 

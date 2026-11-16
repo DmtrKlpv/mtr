@@ -56,29 +56,40 @@ function jobProgress() {
 }
 
 /* ---------- Блок 1: сборка плейлиста из папки ---------- */
-function folderScanBlock() {
-  const pathInput = el('input', {
-    type: 'text', class: 'wide', value: '/music/',
-    placeholder: '/music/Дискографии/Artist1',
-    'aria-label': 'Путь к папке артиста',
-  });
-  const nameInput = el('input', {
-    type: 'text', placeholder: 'Имя папки (по умолчанию)',
-    'aria-label': 'Имя плейлиста',
-  });
+function folderScanBlock(onDone) {
+  const base = el('span', { class: 'mono small' }, '…');
+  const select = el('select', { 'aria-label': 'Папка в каталоге музыки' },
+    el('option', { value: '' }, 'Загрузка…'));
   const progress = jobProgress();
   const result = el('div', { class: 'import-result' });
+
+  const loadFolders = async () => {
+    try {
+      const data = await api('/api/web/music-folders');
+      base.textContent = data.root;
+      const items = data.items || [];
+      fill(select, ...(items.length
+        ? [el('option', { value: '' }, 'Выберите папку'),
+           ...items.map((f) => el('option', { value: f.path }, f.name))]
+        : [el('option', { value: '' }, 'В каталоге музыки нет папок')]));
+    } catch (error) {
+      fill(select, el('option', { value: '' }, 'Не удалось загрузить список'));
+    }
+  };
+  loadFolders();
 
   const startButton = el('button', {
     class: 'primary',
     onclick: async (event) => {
+      const folder = select.value;
+      if (!folder) return;
       const button = event.currentTarget;
       button.disabled = true;
       fill(result);
       try {
         const job = await api('/api/web/playlists/folder-scan', {
           method: 'POST',
-          body: JSON.stringify({ folder: pathInput.value.trim(), name: nameInput.value.trim() || null }),
+          body: JSON.stringify({ folder }),
         });
         progress.update(job);
         pollFolderJob(job.id, (current) => {
@@ -89,40 +100,56 @@ function folderScanBlock() {
             fill(result, el('p', { class: 'error' }, current.error || 'Ошибка сборки'));
             return;
           }
-          const r = current.result || {};
-          const lines = [
-            `Плейлист «${r.name}»: ${r.matched} из ${r.files_found} файлов добавлено.`,
-          ];
-          if (r.unmatched_count) {
-            lines.push(`Не найдено в медиатеке: ${r.unmatched_count}. Запустите сканирование сервера и повторите.`);
-          }
-          fill(result,
-            el('p', { class: 'small' }, ...lines.map((text) => el('span', { class: 'block' }, text))),
-            r.unmatched && r.unmatched.length
-              ? el('div', { class: 'mono small path-cell' }, ...r.unmatched.slice(0, 20).map((p) => el('div', {}, p)))
-              : null,
-          );
+          renderScanResult(result, current.result || {});
+          if (onDone) onDone();
         });
       } catch (error) {
         button.disabled = false;
         fill(result, el('p', { class: 'error' }, error.message));
       }
     },
-  }, 'Собрать плейлист');
+  }, 'Собрать плейлисты');
 
   return el('section', { class: 'folder-block' },
     el('h3', {}, 'Сборка плейлиста из папки'),
     el('p', { class: 'muted small' },
-      'Скрипт рекурсивно обходит папку (1-й уровень) и все её подпапки (альбомы, синглы). ' +
-      'Все найденные аудиофайлы объединяются в ОДИН общий плейлист. ' +
-      'Имя плейлиста по умолчанию это имя корневой папки.'),
+      'Выберите папку в каталоге музыки. Для каждой её подпапки создаётся отдельный плейлист из всех аудиофайлов внутри неё, включая вложенные папки. ' +
+      'Имя плейлиста — имя подпапки. Если подпапок нет, плейлист собирается из самой выбранной папки. ' +
+      'Плейлист из подпапки, который уже собран, пропускается: обновляйте его через ресинк ниже.'),
     el('div', { class: 'form-grid' },
-      el('label', {}, 'Путь к папке'), pathInput,
-      el('label', {}, 'Имя плейлиста'), nameInput,
+      el('label', {}, 'Каталог музыки'), base,
+      el('label', {}, 'Папка'), select,
     ),
     el('div', { class: 'row' }, startButton),
     progress.node,
     result,
+  );
+}
+
+function renderScanResult(container, r) {
+  const created = r.playlists || [];
+  const tracks = created.reduce((sum, p) => sum + p.matched, 0);
+  const lines = [created.length
+    ? `Создано плейлистов: ${created.length}, треков: ${tracks}.`
+    : 'Новых плейлистов не создано.'];
+  if (r.already_synced && r.already_synced.length) {
+    lines.push(`Пропущено, уже собраны раньше: ${r.already_synced.length}.`);
+  }
+  if (r.loose_files) {
+    lines.push(`Файлы прямо в выбранной папке, не в подпапках, не добавлены: ${r.loose_files}.`);
+  }
+  if (r.unmatched_count) {
+    lines.push(`Не найдено в медиатеке: ${r.unmatched_count}. Запустите сканирование сервера и повторите.`);
+  }
+  fill(container,
+    el('p', { class: 'small' }, ...lines.map((text) => el('span', { class: 'block' }, text))),
+    created.length
+      ? el('div', { class: 'mono small path-cell' },
+          ...created.map((p) => el('div', {}, `${p.name} — ${p.matched} треков`)))
+      : null,
+    r.unmatched && r.unmatched.length
+      ? el('div', { class: 'mono small path-cell' }, ...r.unmatched.slice(0, 20).map((p) => el('div', {}, p)))
+      : null,
   );
 }
 
@@ -265,7 +292,7 @@ function resyncBlock() {
     },
   }, 'Проверить изменения');
 
-  return el('section', { class: 'folder-block' },
+  const node = el('section', { class: 'folder-block' },
     el('h3', {}, 'Ресинк плейлиста с папкой'),
     el('p', { class: 'muted small' },
       'Сверяет плейлист с его папкой. Пропавшие треки сначала ищутся в медиатеке по новому пути, ' +
@@ -276,13 +303,15 @@ function resyncBlock() {
     progress.node,
     result,
   );
+  return { node, reload: loadList };
 }
 
 /* Блоки вставляются в раздел «Импорт плейлистов» перед существующим импортом m3u8. */
 function folderSyncSections() {
+  const resync = resyncBlock();
   return [
-    folderScanBlock(),
-    resyncBlock(),
+    folderScanBlock(resync.reload),
+    resync.node,
     el('h3', {}, 'Импорт .m3u / .m3u8'),
   ];
 }

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 
 import httpx
-import pytest
 
 from tests.test_web import PASSWORD, USER_PASSWORD, login, login_admin, web  # noqa: F401
 
@@ -205,9 +203,7 @@ async def test_import_does_not_create_duplicates_for_same_name(web):
     assert len(same_name) == 1, [p["name"] for p in listed]
 
 
-# ----------------------------------------------------------------------
 # Массовое удаление плейлистов
-# ----------------------------------------------------------------------
 async def _create_playlists(client, app, names, *, with_track=True) -> list[int]:
     csrf = await login_admin(client)
     admin = await app.state.ctx.users.get_by_username("admin")
@@ -258,7 +254,7 @@ async def test_purge_empty_only(web):
 async def test_purge_does_not_touch_foreign_without_admin_scope(web):
     """Обычный пользователь не должен удалять чужие плейлисты."""
     client, app = web
-    csrf = await login_admin(client)
+    await login_admin(client)
     admin = await app.state.ctx.users.get_by_username("admin")
     await app.state.ctx.playlists.create(admin.id, "AdminList")
 

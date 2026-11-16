@@ -25,9 +25,7 @@ async def _music_db(path: Path) -> Database:
     return db
 
 
-# ----------------------------------------------------------------------
 # A. Чтение отдельно от записи
-# ----------------------------------------------------------------------
 async def test_reader_sees_only_committed_rows(tmp_path: Path):
     """Чтение из другой задачи видит закоммиченное, а не незакоммиченную запись."""
     db = await _music_db(tmp_path / "m.db")
@@ -97,9 +95,7 @@ async def test_reader_is_read_only(tmp_path: Path):
         await db.close()
 
 
-# ----------------------------------------------------------------------
 # B. Батч записи в сканере: ошибка одного файла не теряет остальные
-# ----------------------------------------------------------------------
 async def test_scan_batch_keeps_good_files_when_one_fails(tmp_path: Path, monkeypatch):
     music = tmp_path / "music"
     for i in range(6):
@@ -158,9 +154,7 @@ async def test_batch_result_equals_single_file_result(tmp_path: Path):
     assert len(one) == 7
 
 
-# ----------------------------------------------------------------------
 # C. Список исполнителей: тот же результат, что раньше
-# ----------------------------------------------------------------------
 async def test_artist_list_and_count_ignore_missing_tracks(tmp_path: Path):
     db = await _music_db(tmp_path / "m.db")
     try:
@@ -186,9 +180,7 @@ async def test_artist_list_and_count_ignore_missing_tracks(tmp_path: Path):
         await db.close()
 
 
-# ----------------------------------------------------------------------
 # D. Пауза фазы обложек при активности пользователя
-# ----------------------------------------------------------------------
 def test_user_paths_and_exclusions():
     assert is_user_path("/api/web/albums")
     assert is_user_path("/api/web/artists")

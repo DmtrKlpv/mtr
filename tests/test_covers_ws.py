@@ -12,7 +12,6 @@ import pytest
 
 from app.covers.service import (
     MAX_COVER_BYTES,
-    CoverData,
     _mime_of,
     cache_filename,
     extract_cover,
@@ -43,9 +42,7 @@ def body(response: httpx.Response) -> dict:
     return response.json()["subsonic-response"]
 
 
-# ----------------------------------------------------------------------
 # Определение типа и имя кэша (без БД)
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "data,expected",
     [
@@ -75,9 +72,7 @@ def test_cache_filename_sanitises_key():
     assert "/" not in name and ".." not in name
 
 
-# ----------------------------------------------------------------------
 # Разбор id обложки
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -94,9 +89,7 @@ def test_parse_cover_id(raw, expected):
     assert _parse_cover_id(raw) == expected
 
 
-# ----------------------------------------------------------------------
 # Извлечение обложек с диска
-# ----------------------------------------------------------------------
 def test_extract_from_directory_by_priority(music_dir: Path):
     album = music_dir / "Artist" / "Album"
     track = make_mp3(album / "01.mp3")
@@ -170,9 +163,7 @@ def test_oversized_cover_file_skipped(music_dir: Path):
     assert extract_from_directory(track) is None
 
 
-# ----------------------------------------------------------------------
 # HTTP
-# ----------------------------------------------------------------------
 @pytest.fixture
 async def lib(settings, monkeypatch, music_dir) -> AsyncIterator[tuple]:
     monkeypatch.setenv("MUSIC_DIR", str(settings.music_dir))
@@ -278,9 +269,7 @@ async def test_cover_stats_endpoint(lib):
     assert r.json()["count"] >= 1
 
 
-# ----------------------------------------------------------------------
 # WebSocket
-# ----------------------------------------------------------------------
 async def test_ws_rejects_without_auth(lib):
     from starlette.testclient import TestClient
 

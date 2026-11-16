@@ -173,9 +173,7 @@ def normalize_filename(name: str) -> list[str]:
     return out
 
 
-# ----------------------------------------------------------------------
 # Индекс библиотеки
-# ----------------------------------------------------------------------
 # Метка варианта: её видит пользователь в списке выбора.
 MATCH_BY_TITLE_ARTIST = "title_artist"
 MATCH_BY_TITLE_BASE = "title_base"
@@ -277,28 +275,3 @@ class TrackIndex:
             ),
         )
         return ordered[:limit]
-
-    def suggest_many(
-        self,
-        entries: Iterable[dict[str, Any]],
-        *,
-        limit: int = 5,
-        exclude: set[int] | None = None,
-    ) -> dict[str, list[tuple[dict[str, Any], str]]]:
-        """Варианты сразу для пачки записей: ключ — поле ``raw_path``.
-
-        Записи без ``raw_path`` пропускаются.
-        """
-        out: dict[str, list[tuple[dict[str, Any], str]]] = {}
-        for entry in entries:
-            key = str(entry.get("raw_path") or "")
-            if not key:
-                continue
-            out[key] = self.suggest(
-                title=entry.get("title"),
-                artist=entry.get("artist"),
-                filename=key,
-                limit=limit,
-                exclude=exclude,
-            )
-        return out

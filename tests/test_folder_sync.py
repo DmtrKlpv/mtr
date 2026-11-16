@@ -36,43 +36,103 @@ async def _scan(ctx) -> None:
     await ctx.scanner.scan(mode="incremental")
 
 
-async def test_scan_builds_one_playlist_sorted_by_folder_disc_track(ctx, music_dir, layout):
+async def test_scan_builds_playlist_per_subfolder_sorted_by_disc_track(ctx, music_dir, layout):
     await _scan(ctx)
-    result = await fs.scan_folder_to_playlist(
+    result = await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
         folder=str(music_dir / "Artist1"), owner_id=OWNER,
     )
-    assert result.name == "Artist1"  # по умолчанию — имя корневой папки
-    assert result.matched == 3 and result.unmatched == []
+    assert [p.name for p in result.playlists] == ["Album A", "Single"]
+    assert [p.matched for p in result.playlists] == [2, 1]
+    assert result.unmatched == [] and result.loose_files == 0
 
-    tracks = await ctx.playlists.tracks(await ctx.playlists.get(result.playlist_id))
-    titles = [t.title for t in tracks]
-    # «Album A» < «Single» по имени подпапки; внутри альбома — по номеру трека.
-    assert titles == ["First", "Second", "Solo"]
+    album = await ctx.playlists.get(result.playlists[0].playlist_id)
+    titles = [t.title for t in await ctx.playlists.tracks(album)]
+    assert titles == ["First", "Second"]
 
 
 async def test_scan_stores_links_to_tracks_not_paths(ctx, music_dir, layout):
     await _scan(ctx)
-    result = await fs.scan_folder_to_playlist(
+    result = await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
         folder=str(music_dir / "Artist1"), owner_id=OWNER,
     )
-    rows = await ctx.music_db.fetch_all(
-        "SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
-        (result.playlist_id,),
-    )
-    assert all(isinstance(r["track_id"], int) for r in rows)
-    assert len(rows) == 3
+    total_links = 0
+    for playlist in result.playlists:
+        rows = await ctx.music_db.fetch_all(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
+            (playlist.playlist_id,),
+        )
+        assert all(isinstance(r["track_id"], int) for r in rows)
+        total_links += len(rows)
+    assert total_links == 3
 
 
 async def test_scan_reports_files_not_in_library(ctx, music_dir, layout):
-    # Сервер ещё не сканировал папку: ничего не найдено, всё — в unmatched.
-    result = await fs.scan_folder_to_playlist(
+    # Сервер ещё не просканировал папку: ничего не найдено, всё — в unmatched, плейлистов нет.
+    result = await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
         folder=str(music_dir / "Artist1"), owner_id=OWNER,
     )
-    assert result.matched == 0
+    assert result.playlists == []
     assert len(result.unmatched) == 3
+
+
+async def test_scan_builds_playlist_for_each_artist_folder_recursively(ctx, music_dir):
+    root = music_dir / "Дискографии"
+    _make_track(root / "Artist1" / "Album A" / "01.mp3", title="A1", artist="Artist1", album="Album A", track="1")
+    _make_track(root / "Artist2" / "Deep" / "Nested" / "01.mp3", title="B1", artist="Artist2", album="Nested", track="1")
+    _make_track(root / "stray.mp3", title="Stray", artist="Stray", album="Stray", track="1")
+    (root / "Empty").mkdir()
+    await _scan(ctx)
+
+    result = await fs.scan_folder_to_playlists(
+        db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
+        folder=str(root), owner_id=OWNER,
+    )
+    assert [p.name for p in result.playlists] == ["Artist1", "Artist2"]
+    assert [p.folder for p in result.playlists] == [str(root / "Artist1"), str(root / "Artist2")]
+    assert [p.matched for p in result.playlists] == [1, 1]
+    assert result.loose_files == 1
+    assert result.unmatched == []
+
+
+async def test_second_run_skips_already_synced_folders(ctx, music_dir):
+    root = music_dir / "Дискографии"
+    _make_track(root / "Artist1" / "01.mp3", title="A1", artist="Artist1", album="Artist1", track="1")
+    await _scan(ctx)
+    first = await fs.scan_folder_to_playlists(
+        db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
+        folder=str(root), owner_id=OWNER,
+    )
+    second = await fs.scan_folder_to_playlists(
+        db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
+        folder=str(root), owner_id=OWNER,
+    )
+    assert len(first.playlists) == 1
+    assert second.playlists == []
+    assert second.already_synced == [str(root / "Artist1")]
+    assert await ctx.music_db.fetch_value(
+        "SELECT COUNT(*) FROM playlists WHERE owner_id = ?", (OWNER,)
+    ) == 1
+
+
+async def test_leaf_folder_builds_single_playlist_from_itself(ctx, music_dir, layout):
+    await _scan(ctx)
+    result = await fs.scan_folder_to_playlists(
+        db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
+        folder=str(music_dir / "Artist1" / "Album A"), owner_id=OWNER,
+    )
+    assert [(p.name, p.matched) for p in result.playlists] == [("Album A", 2)]
+
+
+def test_list_subfolders_returns_first_level_dirs_only(music_dir):
+    (music_dir / "Zeta").mkdir()
+    (music_dir / "Alpha").mkdir()
+    (music_dir / "Alpha" / "Inner").mkdir()
+    (music_dir / ".hidden").mkdir()
+    (music_dir / "file.txt").write_text("x")
+    assert [s["name"] for s in fs.list_subfolders(music_dir)] == ["Alpha", "Zeta"]
 
 
 @pytest.mark.parametrize("raw, code", [
@@ -89,13 +149,13 @@ async def test_validate_folder_rejects(ctx, music_dir, raw, code):
 
 async def test_resync_refuses_when_library_is_stale(ctx, music_dir, layout):
     await _scan(ctx)
-    pl = await fs.scan_folder_to_playlist(
+    pl = (await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
-        folder=str(music_dir / "Artist1"), owner_id=OWNER,
-    )
-    # Меняем папку ПОСЛЕ последнего скана.
-    later = max(os.stat(music_dir / "Artist1").st_mtime, 0) + 100
-    os.utime(music_dir / "Artist1" / "Single", (later, later))
+        folder=str(music_dir / "Artist1" / "Album A"), owner_id=OWNER,
+    )).playlists[0]
+    # Меняем файл в папке ПОСЛЕ последнего скана.
+    later = os.stat(layout["a1"]).st_mtime + 100
+    os.utime(layout["a1"], (later, later))
 
     with pytest.raises(FolderSyncError) as info:
         await fs.build_resync_plan(
@@ -108,12 +168,13 @@ async def test_resync_refuses_when_library_is_stale(ctx, music_dir, layout):
 
 async def test_resync_relocates_moved_track_and_keeps_position(ctx, music_dir, layout):
     await _scan(ctx)
-    pl = await fs.scan_folder_to_playlist(
+    pl = (await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
-        folder=str(music_dir / "Artist1"), owner_id=OWNER,
-    )
-    # Переносим трек из альбома в Single ДО скана — сервер его проиндексирует.
-    moved = music_dir / "Artist1" / "Single" / "01-moved.mp3"
+        folder=str(music_dir / "Artist1" / "Album A"), owner_id=OWNER,
+    )).playlists[0]
+    # Переносим трек внутри папки плейлиста ДО скана — сервер его проиндексирует.
+    moved = music_dir / "Artist1" / "Album A" / "CD2" / "01-moved.mp3"
+    moved.parent.mkdir()
     os.replace(layout["a1"], moved)
     await _scan(ctx)
 
@@ -139,11 +200,11 @@ async def test_resync_relocates_moved_track_and_keeps_position(ctx, music_dir, l
 
 async def test_resync_removes_only_after_confirmation(ctx, music_dir, layout):
     await _scan(ctx)
-    pl = await fs.scan_folder_to_playlist(
+    pl = (await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
-        folder=str(music_dir / "Artist1"), owner_id=OWNER,
-    )
-    os.remove(layout["s"])
+        folder=str(music_dir / "Artist1" / "Album A"), owner_id=OWNER,
+    )).playlists[0]
+    os.remove(layout["a2"])
     await _scan(ctx)
 
     plan = await fs.build_resync_plan(
@@ -159,7 +220,7 @@ async def test_resync_removes_only_after_confirmation(ctx, music_dir, layout):
     )
     assert await ctx.music_db.fetch_value(
         "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?", (pl.playlist_id,)
-    ) == 3
+    ) == 2
 
     # После подтверждения — удаляется, позиции перенумерованы без дыр.
     result = await fs.apply_resync_plan(
@@ -170,17 +231,17 @@ async def test_resync_removes_only_after_confirmation(ctx, music_dir, layout):
         "SELECT position FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
         (pl.playlist_id,),
     )]
-    assert positions == [0, 1]
+    assert positions == [0]
 
 
 async def test_resync_adds_new_files(ctx, music_dir, layout):
     await _scan(ctx)
-    pl = await fs.scan_folder_to_playlist(
+    pl = (await fs.scan_folder_to_playlists(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,
-        folder=str(music_dir / "Artist1"), owner_id=OWNER,
-    )
-    _make_track(music_dir / "Artist1" / "Single" / "02.mp3", title="New", artist="Artist1",
-                album="Single", track="2")
+        folder=str(music_dir / "Artist1" / "Album A"), owner_id=OWNER,
+    )).playlists[0]
+    _make_track(music_dir / "Artist1" / "Album A" / "03.mp3", title="New", artist="Artist1",
+                album="Album A", track="3")
     await _scan(ctx)
     plan = await fs.build_resync_plan(
         db=ctx.music_db, playlists=ctx.playlists, music_root=music_dir,

@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mtr-app:0.24.9
+    image: mtr-app:0.24.13
     container_name: mtr-app
     restart: unless-stopped
     # Ротация логов: без лимита json-file растёт бесконечно и держит диск в работе.

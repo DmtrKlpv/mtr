@@ -72,6 +72,10 @@ APP_HTML = f"""<!DOCTYPE html>
               aria-label="Библиотека">
         <img class="icon" src="/static/icons/home.svg" alt="" aria-hidden="true">
       </button>
+      <button class="rail-btn" data-view="search" title="Поиск"
+              aria-label="Поиск">
+        <img class="icon" src="/static/icons/search.svg" alt="" aria-hidden="true">
+      </button>
       <button class="rail-btn" data-view="playlists" title="Плейлисты"
               aria-label="Плейлисты">
         <img class="icon" src="/static/icons/playlist.svg" alt="" aria-hidden="true">
@@ -108,9 +112,13 @@ APP_HTML = f"""<!DOCTYPE html>
     </div>
 
     <div class="rail-bottom">
-      <button class="rail-btn" id="menu-toggle" title="Настройки"
-              aria-label="Настройки" aria-expanded="false">
+      <button class="rail-btn" data-view="settings" title="Настройки"
+              aria-label="Настройки">
         <img class="icon" src="/static/icons/gear.svg" alt="" aria-hidden="true">
+      </button>
+      <button class="rail-btn" data-view="account" title="Аккаунт"
+              aria-label="Аккаунт">
+        <img class="icon" src="/static/icons/user.svg" alt="" aria-hidden="true">
       </button>
       <button class="rail-btn" id="logout" title="Выйти" aria-label="Выйти">
         <img class="icon" src="/static/icons/logout.svg" alt="" aria-hidden="true">
@@ -118,16 +126,15 @@ APP_HTML = f"""<!DOCTYPE html>
     </div>
   </aside>
 
-  <nav class="menu" id="menu" hidden>
-    <button class="menu-item" data-view="settings">Настройки</button>
-    <button class="menu-item" data-view="account">Аккаунт</button>
-  </nav>
-
   <main id="view" class="view">
     <p class="muted">Загрузка…</p>
   </main>
 
   <footer class="player" id="player" hidden>
+    <div class="player-seek">
+      <input id="seek" type="range" min="0" max="1000" value="0" step="1"
+               aria-label="Позиция трека">
+    </div>
     <div class="player-track">
       <button type="button" id="cover-now-btn" class="cover-now-btn" title="Открыть альбом" aria-label="Открыть альбом">
         <img id="cover-now" class="cover-now" src="/static/placeholder.svg" alt="">
@@ -145,11 +152,7 @@ APP_HTML = f"""<!DOCTYPE html>
         <button id="play" class="play-btn icon-btn" title="Играть" aria-label="Играть"><img class="icon" src="/static/icons/play.svg" alt="" aria-hidden="true"></button>
         <button id="next" class="ghost icon-btn" title="Следующий" aria-label="Следующий"><img class="icon" src="/static/icons/next.svg" alt="" aria-hidden="true"></button>
       </div>
-      <div class="player-progress">
-        <input id="seek" type="range" min="0" max="1000" value="0" step="1"
-               aria-label="Позиция трека">
-        <span id="time" class="muted mono tiny">0:00 / 0:00</span>
-      </div>
+      <span id="time" class="muted mono tiny">0:00 / 0:00</span>
     </div>
 
     <div class="player-right">

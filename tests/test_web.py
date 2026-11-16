@@ -66,9 +66,7 @@ async def login_admin(client: httpx.AsyncClient) -> str:
     return csrf
 
 
-# ----------------------------------------------------------------------
 # Доступ без сессии
-# ----------------------------------------------------------------------
 async def test_root_redirects_to_login(web):
     client, _ = web
     response = await client.get("/")
@@ -103,9 +101,7 @@ async def test_login_page_available_anonymously(web):
     assert "login-form" in response.text
 
 
-# ----------------------------------------------------------------------
 # Вход
-# ----------------------------------------------------------------------
 async def test_login_success_sets_cookies(web):
     client, _ = web
     response, csrf = await login(client, "admin", PASSWORD)
@@ -155,9 +151,7 @@ async def test_login_page_redirects_when_authenticated(web):
     assert response.headers["location"] == "/app"
 
 
-# ----------------------------------------------------------------------
 # Сессия хранится хэшем
-# ----------------------------------------------------------------------
 async def test_session_token_is_hashed_in_db(web):
     """В базе не должно быть открытого токена: утечка БД не даёт войти."""
     client, app = web
@@ -171,9 +165,7 @@ async def test_session_token_is_hashed_in_db(web):
     assert _hash_token(raw_token) in stored
 
 
-# ----------------------------------------------------------------------
 # CSRF
-# ----------------------------------------------------------------------
 async def test_post_without_csrf_forbidden(web):
     client, _ = web
     await login_admin(client)
@@ -211,9 +203,7 @@ async def test_get_does_not_require_csrf(web):
     assert (await client.get("/api/web/users")).status_code == 200
 
 
-# ----------------------------------------------------------------------
 # Роли
-# ----------------------------------------------------------------------
 async def test_regular_user_cannot_list_users(web):
     client, _ = web
     await login(client, "bob", USER_PASSWORD)
@@ -251,9 +241,7 @@ async def test_regular_user_can_read_library(web):
     assert (await client.get("/api/web/albums")).status_code == 200
 
 
-# ----------------------------------------------------------------------
 # Управление пользователями
-# ----------------------------------------------------------------------
 async def test_create_and_list_users(web):
     client, _ = web
     csrf = await login_admin(client)
@@ -340,9 +328,7 @@ async def test_cannot_demote_last_admin(web):
     assert response.status_code == 400
 
 
-# ----------------------------------------------------------------------
 # Библиотека и сервер
-# ----------------------------------------------------------------------
 async def test_albums_and_search(web):
     client, _ = web
     await login_admin(client)
@@ -413,9 +399,7 @@ async def test_scan_status_reports_queued_command(web):
     assert data["queued"] is False
 
 
-# ----------------------------------------------------------------------
 # Аккаунт
-# ----------------------------------------------------------------------
 async def test_change_own_password(web):
     client, app = web
     csrf = (await login(client, "bob", USER_PASSWORD))[1]
@@ -472,9 +456,7 @@ async def test_cannot_revoke_foreign_session(web):
     await bob.aclose()
 
 
-# ----------------------------------------------------------------------
 # Выход
-# ----------------------------------------------------------------------
 async def test_logout_invalidates_session(web):
     client, app = web
     csrf = await login_admin(client)
@@ -485,9 +467,7 @@ async def test_logout_invalidates_session(web):
     assert await app.state.ctx.users_db.fetch_all("SELECT id FROM sessions") == []
 
 
-# ----------------------------------------------------------------------
 # Статика
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "name,mime",
     [("app.js", "javascript"), ("login.js", "javascript"), ("style.css", "css")],
@@ -508,9 +488,7 @@ async def test_static_rejects_unknown_and_traversal(web, name):
     assert response.status_code in (404, 400, 307)
 
 
-# ----------------------------------------------------------------------
 # Троттлинг входа
-# ----------------------------------------------------------------------
 async def test_login_throttled_after_failures(web):
     client, _ = web
     for _ in range(11):
@@ -521,9 +499,7 @@ async def test_login_throttled_after_failures(web):
     assert response.status_code == 429
 
 
-# ----------------------------------------------------------------------
 # Плеер: бинарные методы принимают сессию ИЛИ Subsonic-токен
-# ----------------------------------------------------------------------
 async def test_stream_works_with_session_cookie(web):
     """Без этого музыка в веб-интерфейсе не играла бы: браузер не имеет токена."""
     client, _ = web

@@ -1,6 +1,10 @@
 .env
-
-mtr_v0.13.5_css_globe.tar.gz
-mtr.tar
-.idea
-/srceens/
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tar.gz
+*.db
+*.db-wal
+*.db-shm
+*.log

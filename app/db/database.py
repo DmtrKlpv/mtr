@@ -41,7 +41,7 @@ from typing import Any
 
 import aiosqlite
 
-from app.utils.alphabet import fold, letter_of
+from app.utils.fold import fold
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +78,7 @@ class Database:
         # Глубина вложенности — имеет смысл ТОЛЬКО для задачи-владельца.
         self._tx_depth = 0
 
-    # ------------------------------------------------------------------
     # Жизненный цикл
-    # ------------------------------------------------------------------
     async def connect(self) -> None:
         """Открывает соединение и выставляет PRAGMA."""
         if self._conn is not None:
@@ -96,8 +94,6 @@ class Database:
             raise DatabaseError(f"[{self.label}] не удалось открыть {self.path}") from exc
 
         conn.row_factory = aiosqlite.Row
-        # Рубрикатор фильтрует в SQL: при LIMIT/OFFSET фильтр по странице не работает.
-        await conn.create_function("mtr_letter", 1, letter_of, deterministic=True)
         # Поиск без учёта регистра и без разницы е/ё. Встроенный lower() в SQLite
         # понимает только латиницу, поэтому кириллица искалась с учётом регистра.
         await conn.create_function("mtr_fold", 1, fold, deterministic=True)
@@ -114,7 +110,6 @@ class Database:
         if str(self.path) != ":memory:":
             reader = await aiosqlite.connect(self.path, isolation_level=None)
             reader.row_factory = aiosqlite.Row
-            await reader.create_function("mtr_letter", 1, letter_of, deterministic=True)
             await reader.create_function("mtr_fold", 1, fold, deterministic=True)
             await reader.execute("PRAGMA busy_timeout=5000")
             await reader.execute("PRAGMA query_only=ON")
@@ -162,9 +157,7 @@ class Database:
         """Открыта ли транзакция (для диагностики и тестов)."""
         return self._tx_owner is not None
 
-    # ------------------------------------------------------------------
     # Дисциплина записи
-    # ------------------------------------------------------------------
     def _owns_transaction(self) -> bool:
         """Принадлежит ли текущая транзакция вызывающей задаче."""
         task = asyncio.current_task()
@@ -191,9 +184,7 @@ class Database:
                 self._tx_owner = None
                 self._tx_depth = 0
 
-    # ------------------------------------------------------------------
     # Низкоуровневые операции
-    # ------------------------------------------------------------------
     async def _run_with_retry(self, factory, *, what: str):
         """Повторяет операцию при SQLITE_BUSY/LOCKED."""
         delay = BUSY_BASE_DELAY
@@ -307,9 +298,7 @@ class Database:
             return default
         return row[0]
 
-    # ------------------------------------------------------------------
     # Транзакции
-    # ------------------------------------------------------------------
     @contextlib.asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
         """Атомарный блок, принадлежащий одной задаче.
@@ -388,9 +377,7 @@ class Database:
             # откатил её при грубой ошибке) — это не повод ронять скан.
             logger.warning("[%s] ROLLBACK не выполнен: %s", self.label, exc)
 
-    # ------------------------------------------------------------------
     # Миграции
-    # ------------------------------------------------------------------
     async def optimize(self) -> None:
         """Лёгкое обновление статистики планировщика (PRAGMA optimize).
 

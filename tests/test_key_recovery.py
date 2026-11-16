@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import hashlib
 
-import httpx
 import pytest
 
 from app.bootstrap import AppContext
 from app.config import Settings
-from app.repositories.users import UserRepository
 from app.security.crypto import PasswordCipher
 from app.subsonic.auth import authenticate
 from app.subsonic.errors import ErrorCode, SubsonicError
@@ -75,9 +73,7 @@ async def stale_key_ctx(tmp_path, settings):
         await ctx.close()
 
 
-# ----------------------------------------------------------------------
 # Слой крипто: почему это вообще возможно
-# ----------------------------------------------------------------------
 def test_pbkdf2_verification_ignores_key():
     """Хэш PBKDF2 не зависит от ключа — основа восстановления."""
     stored = PasswordCipher.hash_password(PASSWORD)
@@ -93,9 +89,7 @@ def test_fernet_copy_is_key_dependent():
         PasswordCipher("key-two").decrypt(token)
 
 
-# ----------------------------------------------------------------------
 # Поведение аутентификации при сменённом ключе
-# ----------------------------------------------------------------------
 async def test_plain_password_works_after_key_change(stale_key_ctx):
     """Вход по паролю обязан работать: он проверяется по PBKDF2."""
     auth = await authenticate(stale_key_ctx, PLAIN_PARAMS, ip="1.1.1.1")
@@ -151,9 +145,7 @@ async def test_reencrypt_requires_matching_password(stale_key_ctx):
         await stale_key_ctx.users.reencrypt_password(record.id, "totally-wrong")
 
 
-# ----------------------------------------------------------------------
 # CLI-эквивалент: принудительный сброс
-# ----------------------------------------------------------------------
 async def test_reset_password_fixes_both_paths(stale_key_ctx):
     """reset_password (CLI setpassword) чинит и пароль, и токен."""
     record = await stale_key_ctx.users.get_by_username("admin")
@@ -176,9 +168,7 @@ async def test_reset_password_fixes_both_paths(stale_key_ctx):
     )
 
 
-# ----------------------------------------------------------------------
 # Диагностика
-# ----------------------------------------------------------------------
 async def test_doctor_detects_broken_cipher(stale_key_ctx):
     from app.diagnostics import run_doctor
 
@@ -206,9 +196,7 @@ async def test_doctor_warns_short_secret(stale_key_ctx):
     assert any("короче" in note for note in report.notes)
 
 
-# ----------------------------------------------------------------------
 # Bootstrap: env-пароль не применяется к существующим пользователям
-# ----------------------------------------------------------------------
 async def test_bootstrap_warns_when_users_exist(ctx, caplog):
     from app.bootstrap import ensure_bootstrap_admin
 

@@ -31,24 +31,6 @@ def to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def parse_iso(value: str | None) -> datetime | None:
-    """Разбирает ISO-строку из БД. Возвращает None для пустых значений."""
-    if not value:
-        return None
-    text = value.strip()
-    # Поддерживаем и 'Z', и '+00:00' — fromisoformat в 3.11+ понимает оба,
-    # но 'Z' безопаснее нормализовать явно.
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 def days_ago_iso(days: int) -> str:
     """ISO-строка для момента N дней назад (для смарт-плейлистов)."""
     from datetime import timedelta

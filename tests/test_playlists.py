@@ -21,7 +21,6 @@ import pytest
 
 from app.playlists.m3u import (
     M3UError,
-    export_m3u8,
     parse_m3u,
     safe_export_filename,
 )
@@ -43,9 +42,7 @@ def body(response: httpx.Response) -> dict:
     return response.json()["subsonic-response"]
 
 
-# ----------------------------------------------------------------------
 # Валидация правил (без БД)
-# ----------------------------------------------------------------------
 def test_validate_rules_defaults():
     parsed = json.loads(validate_rules(None))
     assert parsed["sort"] == "added_at"
@@ -87,9 +84,7 @@ def test_validate_rules_clamps_limit():
     assert json.loads(validate_rules({"limit": 0}))["limit"] >= 1
 
 
-# ----------------------------------------------------------------------
 # M3U8 без БД
-# ----------------------------------------------------------------------
 def test_parse_m3u8_with_metadata():
     text = (
         "#EXTM3U\n"
@@ -150,9 +145,7 @@ def test_export_filename_is_safe(name, expected_absent):
     assert ".." not in result
 
 
-# ----------------------------------------------------------------------
 # HTTP-фикстура
-# ----------------------------------------------------------------------
 @pytest.fixture
 async def lib(settings, monkeypatch, music_dir) -> AsyncIterator[tuple]:
     monkeypatch.setenv("MUSIC_DIR", str(settings.music_dir))
@@ -184,9 +177,7 @@ async def lib(settings, monkeypatch, music_dir) -> AsyncIterator[tuple]:
             yield client, app, [t.id for t in tracks]
 
 
-# ----------------------------------------------------------------------
 # Статические плейлисты
-# ----------------------------------------------------------------------
 async def test_create_and_get_static_playlist(lib):
     client, app, track_ids = lib
     r = await client.get(
@@ -279,9 +270,7 @@ async def test_delete_playlist(lib):
     assert body(r)["error"]["code"] == 70
 
 
-# ----------------------------------------------------------------------
 # Права доступа
-# ----------------------------------------------------------------------
 async def test_private_playlist_hidden_from_other_user(lib):
     client, _, t = lib
     r = await client.get(
@@ -342,9 +331,7 @@ async def test_admin_cannot_read_other_users_private_playlist(lib):
     assert body(r)["error"]["code"] == 70
 
 
-# ----------------------------------------------------------------------
 # Смарт-плейлисты
-# ----------------------------------------------------------------------
 async def test_smart_playlist_resolves_on_the_fly(lib):
     """Смарт-плейлист отражает текущее состояние, а не снимок."""
     client, app, t = lib
@@ -420,9 +407,7 @@ async def test_smart_playlist_not_directly_editable_by_tracks(lib):
     assert all(e["id"] != str(t[0]) or True for e in body(r)["playlist"]["entry"])
 
 
-# ----------------------------------------------------------------------
 # Избранное, оценки, scrobble
-# ----------------------------------------------------------------------
 async def test_star_and_unstar(lib):
     client, _, t = lib
     await client.get(f"/rest/star.view?id={t[0]}&{auth_q()}")
@@ -495,9 +480,7 @@ async def test_scrobble_counts_only_submissions(lib):
     assert count == 2
 
 
-# ----------------------------------------------------------------------
 # Экспорт M3U8 через API
-# ----------------------------------------------------------------------
 async def test_export_playlist_endpoint(lib):
     client, _, t = lib
     r = await client.get(

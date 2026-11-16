@@ -17,8 +17,7 @@ with sync_playwright() as p:
     page.click("#login-submit"); page.wait_for_url("**/app", timeout=15000)
     page.wait_for_timeout(1500)
 
-    page.click("#menu-toggle"); page.wait_for_timeout(300)
-    page.click(".menu-item[data-view='import']"); page.wait_for_timeout(1400)
+    page.click(".rail-btn[data-view='import']"); page.wait_for_timeout(1400)
     page.fill("input[aria-label='Папка с плейлистами']", "/tmp/dupui/music")
     page.wait_for_timeout(1600)
 
@@ -52,8 +51,7 @@ with sync_playwright() as p:
     note("нет плейлистов с 0 треков", all(p["count"] > 0 for p in data), str(data))
 
     # Повторный импорт не должен добавлять плейлисты
-    page.click("#menu-toggle"); page.wait_for_timeout(300)
-    page.click(".menu-item[data-view='import']"); page.wait_for_timeout(1400)
+    page.click(".rail-btn[data-view='import']"); page.wait_for_timeout(1400)
     page.fill("input[aria-label='Папка с плейлистами']", "/tmp/dupui/music")
     page.wait_for_timeout(1400)
     page.locator("#view button").filter(has_text="Импортировать").first.click()

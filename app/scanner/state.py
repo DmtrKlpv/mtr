@@ -39,6 +39,9 @@ class ScanState:
     seen: int = 0                # найдено файлов при обходе
     to_parse: int = 0            # сколько требуют разбора
     processed: int = 0           # сколько уже разобрано
+    in_flight: int = 0           # сколько читается прямо сейчас
+    # Файлы, читающиеся дольше порога: [{"path": ..., "sec": ...}].
+    slow: list[dict] = field(default_factory=list)
     added: int = 0
     updated: int = 0
     unchanged: int = 0
@@ -75,6 +78,8 @@ class ScanState:
             "seen": self.seen,
             "to_parse": self.to_parse,
             "processed": self.processed,
+            "in_flight": self.in_flight,
+            "slow": list(self.slow),
             "percent": self.percent,
             "added": self.added,
             "updated": self.updated,
@@ -85,9 +90,7 @@ class ScanState:
             "recent_errors": list(self.recent_errors),
         }
 
-    # ------------------------------------------------------------------
     # Переходы
-    # ------------------------------------------------------------------
     async def begin(self, mode: str) -> bool:
         """Пытается занять сканер. False — уже идёт другой проход."""
         async with self._lock:
@@ -100,6 +103,8 @@ class ScanState:
             self.finished_at = None
             self.run_id = None
             self.seen = self.to_parse = self.processed = 0
+            self.in_flight = 0
+            self.slow.clear()
             self.added = self.updated = self.unchanged = 0
             self.removed = self.failed = 0
             self.error = None
@@ -126,6 +131,15 @@ class ScanState:
             self.to_parse = int(event["total"] or 0)
         if "processed" in event:
             self.processed = int(event["processed"] or 0)
+        if "in_flight" in event:
+            self.in_flight = int(event["in_flight"] or 0)
+        if "slow" in event:
+            items = event["slow"] or []
+            self.slow = [
+                {"path": str(item.get("path") or ""), "sec": float(item.get("sec") or 0)}
+                for item in items
+                if isinstance(item, dict)
+            ]
         for key in ("added", "updated", "unchanged", "removed", "failed"):
             if key in event:
                 setattr(self, key, int(event[key] or 0))

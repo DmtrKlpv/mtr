@@ -29,6 +29,7 @@ class SettingSpec:
     default: Any
     label: str
     help: str
+    section: str
     minimum: int | None = None
     maximum: int | None = None
     choices: tuple[str, ...] = ()
@@ -81,127 +82,131 @@ class SettingSpec:
 
 # Белый список: только эти ключи можно менять из интерфейса.
 SPECS: dict[str, SettingSpec] = {
-    "scan_interval_sec": SettingSpec(
-        key="scan_interval_sec", kind="int", default=0,
-        label="Интервал скана",
-        help="Страховочный инкрементальный скан, секунд. 0 — выключен.",
-        minimum=0, maximum=86400,
-    ),
-    "max_transcodes": SettingSpec(
-        key="max_transcodes", kind="int", default=4,
-        label="Лимит транскодов",
-        help="Сколько ffmpeg-процессов одновременно. Применяется к новым стримам.",
-        minimum=1, maximum=64,
-    ),
-    "cover_active_window_sec": SettingSpec(
-        key="cover_active_window_sec", kind="int", default=3,
-        label="Пауза обложек: окно активности, сек",
-        help="Сколько секунд после последнего действия в интерфейсе фаза обложек ждёт. "
-             "Меньше — обложки заполняются быстрее, но сильнее мешают просмотру. Применяется сразу.",
-        minimum=1, maximum=60,
-    ),
-    "cover_max_wait_sec": SettingSpec(
-        key="cover_max_wait_sec", kind="int", default=30,
-        label="Пауза обложек: предельное ожидание, сек",
-        help="Сколько фаза ждёт одного альбома из-за активности, потом идёт дальше, "
-             "чтобы не остановиться совсем. Применяется сразу.",
-        minimum=5, maximum=600,
-    ),
-    "cover_prefer_folder_image": SettingSpec(
-        key="cover_prefer_folder_image", kind="bool", default=True,
-        label="Обложка: сначала файл в папке",
-        help="Брать обложку из файла рядом с треками (cover, folder, front, orig, pic "
-             "в любом регистре; jpg, jpeg, jfif, png, webp), а не из тегов аудиофайла. "
-             "Если файла нет — как раньше, из тегов. Применяется к новым обложкам: "
-             "готовые пересобирает кнопка «Пересобрать обложки из папок».",
+    "library_view": SettingSpec(
+        key="library_view", kind="choice", default="albums", section="interface",
+        label="Вид библиотеки при входе",
+        help="Что открывается первым при входе в библиотеку: исполнители, альбомы или плейлисты.",
+        choices=("artists", "albums", "playlists"),
     ),
     "accent_color": SettingSpec(
-        key="accent_color", kind="choice", default="blue",
-        label="Оформление: цвет акцента",
-        help="Цвет кнопок, активного пункта меню, полосы прогресса и подсветки играющего трека. "
+        key="accent_color", kind="choice", default="blue", section="interface",
+        label="Цвет акцента",
+        help="Цвет кнопок, активного пункта меню, полосы прогресса и подсветки текущего трека. "
              "Применяется сразу, без перезагрузки страницы.",
         choices=("blue", "green", "violet", "orange", "teal", "pink", "red"),
     ),
-    "scan_batch_tracks": SettingSpec(
-        key="scan_batch_tracks", kind="int", default=0,
-        label="Разбивать скан по треков",
-        help="Сколько треков обрабатывать за один заход. Следующий заход начинается только "
-             "после записи предыдущего. 0 — все сразу (по умолчанию). 100–500 — меньше "
-             "блокировок и заметнее прогресс на большой библиотеке.",
-        minimum=0, maximum=10000,
-    ),
     "default_transcode": SettingSpec(
-        key="default_transcode", kind="choice", default="raw",
-        label="Формат по умолчанию",
-        help="Формат отдачи, если клиент не указал свой.",
+        key="default_transcode", kind="choice", default="raw", section="playback",
+        label="Формат отдачи по умолчанию",
+        help="Формат, в котором сервер отдаёт треки, если клиент не запросил свой. "
+             "«Без перекодирования» — исходный файл.",
         choices=("raw", "mp3_128", "mp3_256", "mp3_320", "mp3_v0", "flac", "alac"),
     ),
-    "library_view": SettingSpec(
-        key="library_view", kind="choice", default="albums",
-        label="Вид библиотеки по умолчанию",
-        help="Что открывается при входе: исполнители, альбомы или плейлисты.",
-        choices=("artists", "albums", "playlists"),
+    "max_transcodes": SettingSpec(
+        key="max_transcodes", kind="int", default=4, section="playback",
+        label="Лимит одновременных перекодирований",
+        help="Сколько процессов ffmpeg могут перекодировать потоки одновременно. "
+             "Сверх лимита новый поток сразу получает отказ (503), а не ждёт очереди. Применяется сразу.",
+        minimum=1, maximum=64,
     ),
-    "playlists_dir": SettingSpec(
-        key="playlists_dir", kind="text", default="",
-        label="Папка с плейлистами",
-        help="Каталог внутри контейнера, где лежат .m3u/.m3u8 (обходится "
-             "со всеми подпапками). Пусто — поиск по всей библиотеке.",
+    "scan_interval_sec": SettingSpec(
+        key="scan_interval_sec", kind="int", default=0, section="scan",
+        label="Интервал проверки изменений, сек",
+        help="Раз в столько секунд проверять библиотеку и обрабатывать только новые и изменённые файлы. "
+             "Страховка на случай, если слежение за файлами что-то пропустило. 0 — выключено.",
+        minimum=0, maximum=86400,
     ),
-    "playlist_prefix_from": SettingSpec(
-        key="playlist_prefix_from", kind="text", default="",
-        label="Заменять префикс путей: было",
-        help="Старый префикс из m3u8 (например M:/Music). Нужен, если "
-             "плейлист создан на другой машине.",
-    ),
-    "playlist_prefix_to": SettingSpec(
-        key="playlist_prefix_to", kind="text", default="/music",
-        label="Заменять префикс путей: стало",
-        help="На что заменить префикс (путь внутри контейнера).",
+    "scan_batch_tracks": SettingSpec(
+        key="scan_batch_tracks", kind="int", default=0, section="scan",
+        label="Размер порции при скане, треков",
+        help="Сколько треков обработать, прежде чем записать результат в базу. 0 — порциями по 100. "
+             "Большая порция — меньше записей в базу, но больше памяти до записи.",
+        minimum=0, maximum=10000,
     ),
     "scan_concurrency": SettingSpec(
-        key="scan_concurrency", kind="int", default=4,
-        label="Параллельный разбор тегов",
-        help="Сколько файлов читать одновременно при сканировании.",
+        key="scan_concurrency", kind="int", default=4, section="scan",
+        label="Файлов для разбора одновременно",
+        help="Сколько файлов читать и разбирать теги параллельно при сканировании. "
+             "Больше — скан быстрее, но выше нагрузка на диск и процессор.",
         minimum=1, maximum=32,
     ),
-    # --- То, что раньше задавалось только через .env ---------------------
     "watch_enabled": SettingSpec(
-        key="watch_enabled", kind="bool", default=False,
-        label="Наблюдение за библиотекой",
-        help="Следить за появлением и изменением файлов (MTR_WATCH). Включается на лету.",
+        key="watch_enabled", kind="bool", default=False, section="watch",
+        label="Следить за изменениями файлов",
+        help="Сразу замечать появление и изменение файлов в папке с музыкой, без ручного скана. "
+             "Включается без перезапуска.",
     ),
     "watch_polling": SettingSpec(
-        key="watch_polling", kind="bool", default=False,
-        label="Опрос вместо inotify",
-        help="Нужно для Windows-монтирований и части сетевых томов (MTR_WATCH_POLL). "
-             "Требует перезапуска контейнера.",
+        key="watch_polling", kind="bool", default=False, section="watch",
+        label="Проверять папку опросом",
+        help="Нужно для Windows-томов и части сетевых дисков, где системные уведомления о файлах не приходят. "
+             "Опрос нагружает систему сильнее. Требует перезапуска контейнера.",
         restart=True,
     ),
     "watch_poll_ms": SettingSpec(
-        key="watch_poll_ms", kind="int", default=1000,
+        key="watch_poll_ms", kind="int", default=1000, section="watch",
         label="Период опроса, мс",
-        help="Только при включённом опросе (MTR_WATCH_POLL_MS). 1000 — разумный компромисс. "
-             "Требует перезапуска контейнера.",
+        help="Как часто проверять папку, если включён опрос. Меньше — быстрее реакция, но выше нагрузка. "
+             "1000 — разумный компромисс. Требует перезапуска контейнера.",
         minimum=100, maximum=60000, restart=True,
     ),
+    "cover_prefer_folder_image": SettingSpec(
+        key="cover_prefer_folder_image", kind="bool", default=True, section="covers",
+        label="Сначала обложка из файла в папке",
+        help="Брать обложку из файла в папке с треком или в папке выше (cover, folder, front и другие), а не из тегов. "
+             "Если такого файла нет, обложка берётся из тегов. Действует на новые обложки; "
+             "уже готовые пересобираются кнопкой «Пересобрать обложки из папок».",
+    ),
+    "cover_active_window_sec": SettingSpec(
+        key="cover_active_window_sec", kind="int", default=3, section="covers",
+        label="Пауза обложек после действий, сек",
+        help="Сколько секунд после последнего действия в интерфейсе фоновая загрузка обложек ждёт. "
+             "Меньше — обложки заполняются быстрее, но сильнее мешают работе. Применяется сразу.",
+        minimum=1, maximum=60,
+    ),
+    "cover_max_wait_sec": SettingSpec(
+        key="cover_max_wait_sec", kind="int", default=30, section="covers",
+        label="Максимальное ожидание одного альбома, сек",
+        help="Фоновая загрузка обложек уступает действиям в интерфейсе, но не дольше этого времени: "
+             "затем продолжает работу, даже если вы ещё активны. Применяется сразу.",
+        minimum=5, maximum=600,
+    ),
+    "playlists_dir": SettingSpec(
+        key="playlists_dir", kind="text", default="", section="playlists",
+        label="Папка с плейлистами",
+        help="Папка внутри контейнера, где лежат файлы .m3u и .m3u8. Поиск идёт и во вложенных папках. "
+             "Если поле пустое, плейлисты ищутся по всей библиотеке.",
+    ),
+    "playlist_prefix_from": SettingSpec(
+        key="playlist_prefix_from", kind="text", default="", section="playlists",
+        label="Старое начало путей в плейлистах",
+        help="Начало путей внутри .m3u-файлов, которое нужно заменить, например M:/Music. "
+             "Нужно, если плейлист создан на другом компьютере.",
+    ),
+    "playlist_prefix_to": SettingSpec(
+        key="playlist_prefix_to", kind="text", default="/music", section="playlists",
+        label="Новое начало путей (внутри контейнера)",
+        help="На что заменить старое начало пути. По умолчанию /music.",
+    ),
     "log_level": SettingSpec(
-        key="log_level", kind="choice", default="INFO",
-        label="Уровень логов",
-        help="Подробность записей в docker logs (MTR_LOG_LEVEL). Требует перезапуска контейнера.",
-        choices=("DEBUG", "INFO", "WARNING", "ERROR"), restart=True,
+        key="log_level", kind="choice", default="INFO", section="server",
+        label="Подробность журнала",
+        help="Какие записи попадают в журнал контейнера (docker logs): DEBUG — максимум деталей, "
+             "ERROR — только ошибки. Для обычной работы хватает INFO. Требует перезапуска контейнера.",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        restart=True,
     ),
     "cookie_secure": SettingSpec(
-        key="cookie_secure", kind="bool", default=False,
+        key="cookie_secure", kind="bool", default=False, section="server",
         label="Cookie только по HTTPS",
-        help="Включайте, когда сервер доступен по HTTPS (MTR_COOKIE_SECURE). "
-             "При обычном HTTP вход перестанет работать. Требует перезапуска контейнера.",
+        help="Включайте, если сайт открывается по HTTPS. При обычном HTTP вход перестанет работать. "
+             "Требует перезапуска контейнера.",
         restart=True,
     ),
     "subsonic_api_version": SettingSpec(
-        key="subsonic_api_version", kind="text", default="1.16.1",
+        key="subsonic_api_version", kind="text", default="1.16.1", section="server",
         label="Версия Subsonic API",
-        help="Версия, которую сервер объявляет клиентам (MTR_SUBSONIC_VERSION). "
+        help="Версия, которую сервер сообщает Subsonic-клиентам. Меняйте, только если приложение требует другую. "
              "Требует перезапуска контейнера.",
         restart=True,
     ),
@@ -280,5 +285,6 @@ class SettingsRepository:
                 "value": overrides.get(key, spec.default),
                 "overridden": key in overrides,
                 "restart": spec.restart,
+                "section": spec.section,
             })
         return items

@@ -19,8 +19,8 @@ async def _db(path: Path) -> Database:
     return db
 
 
-def test_batch_size_defaults_to_all_at_once():
-    """По умолчанию 0 — все файлы одним заходом (как раньше)."""
+def test_batch_size_defaults_to_auto():
+    """По умолчанию 0 — авто (заходы по SCAN_BATCH)."""
     scanner = Scanner(None, Path("/tmp"))  # конструктор не трогает БД
     assert scanner._batch_size == 0
     scanner.set_batch_size(100)
@@ -59,7 +59,7 @@ async def test_album_payload_has_ids_for_covers_and_artist_link(web):
     from app.worker import ipc
 
     client, app = web
-    csrf = await login_admin(client)
+    await login_admin(client)
     ctx = app.state.ctx
     music = ctx.settings.music_dir
     p = make_mp3(music / "al" / "t.mp3", seconds=0.2)

@@ -55,6 +55,7 @@ class Node_ {
     }
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  focus() {}
   getAttribute(name) { return this.attributes[name]; }
   removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
@@ -169,10 +170,16 @@ const FIXTURES = {
   '/api/web/playlists': { ok: true, data: { items: [{ id: 1, name: 'Test', song_count: 2, is_public: false, is_smart: false, owner_id: 1 }] } },
   '/api/web/playlists/1': { ok: true, data: { id: 1, name: 'Test', is_public: false, is_smart: false, can_edit: true, tracks: TRACKS } },
   '/api/web/albums/1': { ok: true, data: { id: 1, name: 'Opera', artist: 'Queen', artist_id: 1, year: 1975, tracks: TRACKS } },
+  '/api/web/search': { ok: true, data: {
+    artists: [{ id: 1, name: 'Queen', album_count: 1, album_id: 1 }],
+    albums: [ALBUM],
+    playlists: [{ id: 1, name: 'Test', song_count: 2 }],
+    tracks: TRACKS,
+  } },
   '/api/web/users': { ok: true, data: { items: [] } },
   '/api/web/settings': { ok: true, data: { items: [
-    { key: 'library_view', kind: 'choice', label: 'Вид библиотеки по умолчанию', help: 'h', choices: ['artists', 'albums', 'playlists'], value: 'albums', default: 'albums', overridden: false },
-    { key: 'max_transcodes', kind: 'int', label: 'Лимит', help: 'h', minimum: 1, maximum: 64, value: 4, default: 4, overridden: false },
+    { key: 'library_view', kind: 'choice', label: 'Вид библиотеки по умолчанию', help: 'h', choices: ['artists', 'albums', 'playlists'], value: 'albums', default: 'albums', overridden: false, section: 'interface' },
+    { key: 'max_transcodes', kind: 'int', label: 'Лимит', help: 'h', minimum: 1, maximum: 64, value: 4, default: 4, overridden: false, section: 'playback' },
   ] } },
   '/api/web/server': { ok: true, data: { version: '0.8.0', music_dir: '/m', music_dir_exists: true, music_db: 'm', users_db: 'u', schema: { users: 2, music: 2 }, watch_enabled: true, watch_polling: true, scan_interval_sec: 300, max_transcodes: 4, tracks: 3, missing: 0, covers: { count: 5, total_bytes: 2048 } } },
   '/api/web/account/sessions': { ok: true, data: { items: [], current_id: 1 } },
@@ -228,6 +235,7 @@ const sandbox = {
   window: { location: { href: '/app' } },
   fetch: fetch_,
   console, setTimeout, clearTimeout,
+  AbortController: class { constructor() { this.signal = {}; } abort() {} },
   setInterval: fakeSetInterval, clearInterval: fakeClearInterval,
   Promise, Object, Array, JSON, String, Number, Boolean, Math, Date, Set, Map, Error,
   confirm: () => true,
@@ -322,6 +330,7 @@ const viewText = () => textOf(nodeFor('#view'));
   await check('настройки: вид библиотеки и сохранение', async () => {
     await sandbox.setView('settings');
     if (!viewText().includes('Вид библиотеки')) throw new Error('настройка не отрисована');
+    if (!viewText().includes('Интерфейс') || !viewText().includes('Воспроизведение')) throw new Error('нет разделов настроек');
     const before = calls.length;
     const saveBtn = nodeFor('#view').children
       .flatMap((c) => [c, ...c.children])
@@ -552,7 +561,7 @@ const viewText = () => textOf(nodeFor('#view'));
     const text = JSON.stringify(nodes, (k, v) => (k === 'parentNode' || k === 'listeners' || k === 'classList' ? undefined : v));
     if (!text.includes('Сборка плейлиста из папки')) throw new Error('нет блока сборки');
     if (!text.includes('Ресинк плейлиста с папкой')) throw new Error('нет блока ресинка');
-    if (!text.includes('Скрипт рекурсивно обходит папку (1-й уровень)')) throw new Error('нет описания из ТЗ');
+    if (!text.includes('Для каждой её подпапки создаётся отдельный плейлист')) throw new Error('нет описания из ТЗ');
   });
 
   await check('импорт из папки: функции опроса доступны из раздела', () => {
@@ -560,6 +569,65 @@ const viewText = () => textOf(nodeFor('#view'));
     for (const name of ['pollFolderJob', 'stopFolderPolling', 'renderResyncPlan']) {
       if (typeof sandbox[name] !== 'function') throw new Error('нет ' + name);
     }
+  });
+
+  const findAll = (root, pred, out = []) => {
+    if (root && root.nodeType === 1 && pred(root)) out.push(root);
+    for (const child of (root && root.children) || []) findAll(child, pred, out);
+    return out;
+  };
+  const searchCalls = () => calls.filter((c) => c.key === '/api/web/search').length;
+  const pause = () => new Promise((r) => setTimeout(r, 350));
+
+  await check('главная: поля поиска больше нет, он вынесен в рейл', async () => {
+    await sandbox.setView('library');
+    const fields = findAll(nodeFor('#view'), (n) => n.tagName === 'INPUT');
+    if (fields.length) throw new Error('на главной осталось полей ввода: ' + fields.length);
+  });
+
+  await check('поиск: две колонки, смена вкладки без запроса, IME не шлёт запросы', async () => {
+    await sandbox.setView('search');
+    const view = nodeFor('#view');
+    const input = findAll(view, (n) => n.tagName === 'INPUT')[0];
+    if (!input) throw new Error('нет поля поиска');
+    if (!findAll(view, (n) => n.className === 'search-split').length) throw new Error('нет двух колонок');
+
+    const before = searchCalls();
+    input.value = 'Queen';
+    input.listeners.input.forEach((h) => h({ isComposing: false, target: input }));
+    await pause();
+    if (searchCalls() !== before + 1) throw new Error('запросов после ввода: ' + (searchCalls() - before));
+    const text = viewText();
+    for (const label of ['Артисты (1)', 'Альбомы (1)', 'Плейлисты (1)', 'Треков: 2', 'Bohemian', 'Love']) {
+      if (!text.includes(label)) throw new Error('нет на странице: ' + label);
+    }
+    if (!findAll(view, (n) => n.className === 'artist-grid').length) throw new Error('слева не выведены артисты');
+
+    findAll(view, (n) => n.attributes.role === 'tab')[1].listeners.click[0]();
+    if (!findAll(view, (n) => n.className === 'album-grid').length) throw new Error('вкладка «Альбомы» не открылась');
+    if (findAll(view, (n) => n.className === 'artist-grid').length) throw new Error('старая вкладка осталась видна');
+    if (searchCalls() !== before + 1) throw new Error('смена вкладки отправила запрос');
+
+    input.value = 'Ёлк';
+    input.listeners.compositionstart.forEach((h) => h({}));
+    input.listeners.input.forEach((h) => h({ isComposing: true, target: input }));
+    await pause();
+    if (searchCalls() !== before + 1) throw new Error('IME: запрос ушёл во время набора');
+    input.listeners.compositionend.forEach((h) => h({}));
+    await pause();
+    if (searchCalls() !== before + 2) throw new Error('IME: после compositionend запроса нет');
+  });
+
+  await check('поиск: пустой запрос не идёт на сервер и возвращает подсказку', async () => {
+    const view = nodeFor('#view');
+    const input = findAll(view, (n) => n.tagName === 'INPUT')[0];
+    const before = searchCalls();
+    input.value = '   ';
+    input.listeners.input.forEach((h) => h({ isComposing: false, target: input }));
+    await pause();
+    if (searchCalls() !== before) throw new Error('пустой запрос ушёл на сервер');
+    if (input.getAttribute('placeholder') !== 'Введите название, исполнителя, альбом, плейлист или жанр') throw new Error('нет подсказки в поле поиска');
+    if (viewText().includes('Bohemian')) throw new Error('старые треки не очищены');
   });
 
   console.log('');

@@ -29,10 +29,6 @@ def get_ctx(request: Request) -> AppContext:
     return request.app.state.ctx
 
 
-def get_sessions(request: Request):
-    return request.app.state.ctx.sessions
-
-
 async def optional_session(request: Request) -> SessionRecord | None:
     """Сессия из cookie или None. Не бросает исключений."""
     token = request.cookies.get(SESSION_COOKIE)

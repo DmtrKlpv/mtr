@@ -55,14 +55,6 @@ class SubsonicError(Exception):
         )
         super().__init__(f"[{self.code}] {self.message}")
 
-    @property
-    def is_auth_error(self) -> bool:
-        """Ошибки, по которым имеет смысл считать попытки подбора пароля."""
-        return self.code in (
-            ErrorCode.WRONG_CREDENTIALS,
-            ErrorCode.TOKEN_AUTH_UNSUPPORTED,
-        )
-
 
 def missing(name: str) -> SubsonicError:
     """Понятная ошибка «не хватает параметра» с именем параметра."""

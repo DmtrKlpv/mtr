@@ -155,9 +155,7 @@ def _mime_of(data: bytes) -> str:
     return "application/octet-stream"
 
 
-# ----------------------------------------------------------------------
 # Извлечение из тегов
-# ----------------------------------------------------------------------
 def _from_id3(path: Path) -> CoverData | None:
     """APIC-кадр из MP3 (ID3v2)."""
     from mutagen.id3 import ID3, ID3NoHeaderError
@@ -445,9 +443,6 @@ class CoverResolver:
 
     covers_dir: Path
     music_root: Path
-
-    def path_for(self, filename: str) -> Path:
-        return self.covers_dir / filename
 
     def read_cached(self, file_path: str) -> CoverData | None:
         path = Path(file_path)

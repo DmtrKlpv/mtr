@@ -23,9 +23,7 @@ def _image(size: int, fmt: str = "JPEG") -> bytes:
     return buffer.getvalue()
 
 
-# ----------------------------------------------------------------------
 # make_thumbnail
-# ----------------------------------------------------------------------
 def test_large_cover_is_shrunk_to_limit():
     original = _image(1500)
     result = make_thumbnail(original)
@@ -85,9 +83,7 @@ def test_non_square_is_limited_by_longer_side():
         assert image.size == (MAX_COVER_SIDE, 240)
 
 
-# ----------------------------------------------------------------------
 # store: на диск кладётся уже превью
-# ----------------------------------------------------------------------
 async def test_store_writes_thumbnail_to_disk(ctx):
     from app.covers.service import CoverData
 
@@ -107,9 +103,7 @@ async def test_store_writes_thumbnail_to_disk(ctx):
     assert stored.stat().st_size < len(big)
 
 
-# ----------------------------------------------------------------------
 # Ленивое извлечение: обложка берётся только при запросе, фонового прохода нет
-# ----------------------------------------------------------------------
 async def test_scan_does_not_extract_covers(ctx, music_dir: Path, monkeypatch):
     """Скан не читает картинки: только флаг has_cover из заголовков тегов."""
     from tests.conftest import make_mp3, tag_mp3

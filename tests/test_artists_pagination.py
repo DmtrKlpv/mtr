@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 
-from app.repositories.library import LibraryRepository
 
 
 async def _seed(db, artists: int = 200) -> None:

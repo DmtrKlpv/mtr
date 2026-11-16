@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Отсекаем гигантские файлы: плейлист на миллион строк — это атака, не музыка.
 MAX_LINES = 50_000
 MAX_FILE_BYTES = 8 * 1024 * 1024
+_WINDOWS_DRIVE = re.compile(r"[A-Za-z]:/")
 
 
 class M3UError(Exception):
@@ -141,17 +143,15 @@ def _resolve_path(raw_path: str, source_dir: Path | None) -> str:
     if "://" in normalized:
         # Сетевые URL не поддерживаем: файла на диске нет.
         return normalized
+    if _WINDOWS_DRIVE.match(normalized):
+        # Буква диска — абсолютный путь Windows; Path() на Linux так его не считает.
+        return normalized
     path = Path(normalized)
     if path.is_absolute():
         return str(PurePosixPath(normalized))
     if source_dir is not None:
         return str(PurePosixPath(str(source_dir), normalized))
     return normalized
-
-
-def playlist_name_from_path(path: Path) -> str:
-    """Имя плейлиста по имени файла без расширения."""
-    return Path(path).stem.strip() or "Импортированный плейлист"
 
 
 def export_m3u8(playlist: PlaylistRow, tracks: list[TrackRow]) -> str:

@@ -5,6 +5,7 @@
 
 Маршруты:
   POST /api/web/playlists/folder-scan                 — запуск сборки (job)
+  GET  /api/web/music-folders                 — папки первого уровня в каталоге музыки
   GET  /api/web/playlists/folder-jobs/{job_id}         — опрос прогресса
   POST /api/web/playlists/{id}/resync/preview          — запуск проверки (job)
   POST /api/web/playlists/{id}/resync/confirm          — применить превью
@@ -29,7 +30,8 @@ from app.playlists.folder_sync import (
     PlanStore,
     apply_resync_plan,
     build_resync_plan,
-    scan_folder_to_playlist,
+    list_subfolders,
+    scan_folder_to_playlists,
 )
 from app.repositories.playlists import PlaylistRepository
 from app.web.deps import csrf_protected, current_session, get_ctx
@@ -86,16 +88,14 @@ def _user_flags(session: SessionRecord) -> tuple[int, bool]:
     return session.user.id, session.user.role == "admin"
 
 
-# ----------------------------------------------------------------------
 # Сценарий 1: папка → плейлист
-# ----------------------------------------------------------------------
 @router.post("/playlists/folder-scan")
 async def start_folder_scan(
     request: Request,
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(csrf_protected),
 ) -> JSONResponse:
-    """Body: {"folder": "/music/Artist1", "name": "опционально"}."""
+    """Body: {"folder": "/music/Дискографии"} — каждая подпапка станет плейлистом."""
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -103,7 +103,6 @@ async def start_folder_scan(
     if not isinstance(body, dict):
         body = {}
     folder = str(body.get("folder") or "")
-    name = body.get("name")
     user_id, _ = _user_flags(session)
 
     # Проверку пути делаем сразу, чтобы клиент увидел ошибку без опроса.
@@ -113,27 +112,24 @@ async def start_folder_scan(
         return _error(exc)
 
     job = JOBS.new("scan")
-    _spawn(job, _run_scan(ctx, job, folder, user_id, name))
+    _spawn(job, _run_scan(ctx, job, folder, user_id))
     return JSONResponse({"ok": True, "data": job.as_dict()}, status_code=202)
 
 
-async def _run_scan(ctx: AppContext, job, folder: str, user_id: int, name) -> None:
-    result = await scan_folder_to_playlist(
+async def _run_scan(ctx: AppContext, job, folder: str, user_id: int) -> None:
+    result = await scan_folder_to_playlists(
         db=ctx.music_db,
         playlists=ctx.playlists,
         music_root=ctx.settings.music_dir,
         folder=folder,
         owner_id=user_id,
-        name=name if isinstance(name, str) else None,
         job=job,
     )
     job.result = result.as_dict()
     job.done = job.total
 
 
-# ----------------------------------------------------------------------
 # Сценарий 2: ресинк
-# ----------------------------------------------------------------------
 @router.post("/playlists/{playlist_id}/resync/preview")
 async def start_resync_preview(
     playlist_id: int,
@@ -212,6 +208,17 @@ async def folder_job_status(
     if job is None:
         return JSONResponse({"ok": False, "detail": "Задача не найдена"}, status_code=404)
     return JSONResponse({"ok": True, "data": job.as_dict()})
+
+
+@router.get("/music-folders")
+async def folder_roots(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(current_session),
+) -> JSONResponse:
+    """Папки первого уровня в каталоге музыки: варианты для формы сборки."""
+    music = ctx.settings.music_dir
+    items = await asyncio.to_thread(list_subfolders, music)
+    return JSONResponse({"ok": True, "data": {"root": str(music), "items": items}})
 
 
 @router.get("/folder-synced-playlists")

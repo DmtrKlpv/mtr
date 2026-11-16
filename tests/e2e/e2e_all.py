@@ -15,10 +15,8 @@ def login(page):
     page.click("#login-submit"); page.wait_for_url("**/app", timeout=15000)
     page.wait_for_timeout(1200)
 
-def open_menu_item(page, view):
-    if page.locator("#menu-toggle").count():
-        page.click("#menu-toggle"); page.wait_for_timeout(300)
-    page.click(f".menu-item[data-view='{view}']"); page.wait_for_timeout(1000)
+def open_rail_item(page, view):
+    page.click(f".rail-btn[data-view='{view}']"); page.wait_for_timeout(1000)
 
 with sync_playwright() as p:
     b = p.chromium.launch()
@@ -63,7 +61,7 @@ with sync_playwright() as p:
          or "пока нет" in page.inner_text("#view"))
 
     # --- Меню: разделы ---
-    open_menu_item(page, "settings")
+    open_rail_item(page, "settings")
     note("настройки открываются", "библиотеки" in page.inner_text("#view").lower())
     sel = page.locator("select[data-key='library_view']")
     note("в настройках есть вид по умолчанию", sel.count() == 1, f"найдено={sel.count()}")
@@ -76,12 +74,12 @@ with sync_playwright() as p:
         active = page.locator(".segment.active").inner_text().strip() if page.locator(".segment.active").count() else ""
         note("вид по умолчанию применился", "Плейлисты" in active, f"активен={active!r}")
         # вернуть
-        open_menu_item(page, "settings")
+        open_rail_item(page, "settings")
         page.locator("select[data-key='library_view']").select_option("albums")
         page.locator("button", has_text="Сохранить").first.click(); page.wait_for_timeout(1000)
 
     for view, name in [("users", "Пользователи"), ("server", "Сервер"), ("account", "Аккаунт")]:
-        open_menu_item(page, view)
+        open_rail_item(page, view)
         note(f"раздел «{name}» открывается", len(page.inner_text("#view").strip()) > 10)
 
     # --- Мобильный вид ---

@@ -40,9 +40,7 @@ async def _names(db: Database, tag: str) -> list[int]:
     return [int(row["n"]) for row in rows]
 
 
-# ----------------------------------------------------------------------
 # 1. Изоляция задач: падение A не уносит работу B
-# ----------------------------------------------------------------------
 async def test_failed_transaction_does_not_rollback_other_task(db: Database):
     """Ключевой инвариант: успешная запись B выживает при откате A."""
     async def task_a() -> None:
@@ -65,9 +63,7 @@ async def test_failed_transaction_does_not_rollback_other_task(db: Database):
     assert await _names(db, "a") == []
 
 
-# ----------------------------------------------------------------------
 # 2. Нет «cannot start a transaction within a transaction»
-# ----------------------------------------------------------------------
 async def test_no_implicit_transaction_conflict(db: Database):
     """isolation_level=None: sqlite3 не открывает транзакцию сам.
 
@@ -128,9 +124,7 @@ async def test_mixed_single_and_transactional_writes(db: Database):
     assert len(await _names(db, "single")) == 40
 
 
-# ----------------------------------------------------------------------
 # 3. Вложенные транзакции через SAVEPOINT
-# ----------------------------------------------------------------------
 async def test_nested_rollback_preserves_outer_changes(db: Database):
     """Откат внутреннего блока не отменяет то, что сделал внешний."""
     async with db.transaction():
@@ -171,9 +165,7 @@ async def test_outer_failure_discards_nested_commits(db: Database):
     assert await _names(db, "i") == []
 
 
-# ----------------------------------------------------------------------
 # 4. Сбой COMMIT не должен молча терять данные
-# ----------------------------------------------------------------------
 async def test_commit_failure_raises_instead_of_swallowing(db: Database):
     """Если COMMIT не удался, вызывающий код обязан узнать об этом.
 

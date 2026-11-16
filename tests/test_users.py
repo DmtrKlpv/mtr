@@ -8,9 +8,7 @@ from app.repositories.users import UserError
 from app.security.crypto import CryptoError, PasswordCipher
 
 
-# ----------------------------------------------------------------------
 # Крипто
-# ----------------------------------------------------------------------
 def test_encrypt_decrypt_roundtrip():
     cipher = PasswordCipher("my-secret")
     token = cipher.encrypt("S3cret-pass")
@@ -64,9 +62,7 @@ def test_env_secret_wins(tmp_path):
     assert not key_file.exists()
 
 
-# ----------------------------------------------------------------------
 # Пользователи
-# ----------------------------------------------------------------------
 async def test_create_and_read_user(ctx):
     created = await ctx.users.create_user("bob", "password123", role="user")
     assert created.id > 0

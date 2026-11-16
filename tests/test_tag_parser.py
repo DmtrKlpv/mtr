@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from app.scanner import tag_parser
 from app.scanner.tag_parser import (
     MAX_STRING_LEN,
     clean_genre,
@@ -24,9 +23,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# ----------------------------------------------------------------------
 # Чистые нормализаторы (без файлов)
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -88,9 +85,7 @@ def test_is_supported_audio(path, expected):
     assert is_supported_audio(path) is expected
 
 
-# ----------------------------------------------------------------------
 # MP3 / ID3
-# ----------------------------------------------------------------------
 def test_mp3_full_tags(music_dir: Path):
     path = make_mp3(music_dir / "artist" / "album" / "01-song.mp3", seconds=1.5)
     tag_mp3(
@@ -161,9 +156,7 @@ def test_mp3_unicode_tags_survive(music_dir: Path):
     assert len(meta.title) == 400
 
 
-# ----------------------------------------------------------------------
 # FLAC / Vorbis
-# ----------------------------------------------------------------------
 def test_flac_tags(music_dir: Path):
     path = make_flac(music_dir / "lossless.flac")
     tag_flac(
@@ -188,9 +181,7 @@ def test_flac_tags(music_dir: Path):
     assert meta.bitrate is not None  # FLAC тоже отдаёт bitrate
 
 
-# ----------------------------------------------------------------------
 # M4A / AAC
-# ----------------------------------------------------------------------
 def test_m4a_tags(music_dir: Path):
     path = make_m4a(music_dir / "aac.m4a")
     from mutagen.mp4 import MP4
@@ -214,9 +205,7 @@ def test_m4a_tags(music_dir: Path):
     assert meta.year == 2015
 
 
-# ----------------------------------------------------------------------
 # Отказоустойчивость
-# ----------------------------------------------------------------------
 def test_missing_file_returns_error(music_dir: Path):
     meta = parse_track(music_dir / "nope.mp3")
     assert meta.ok is False
@@ -272,9 +261,7 @@ def test_parser_never_raises_on_random_suffix(music_dir: Path):
     assert isinstance(meta.ok, bool)
 
 
-# ----------------------------------------------------------------------
 # Регрессия: парсер не привязан к расширению при чтении info
-# ----------------------------------------------------------------------
 def test_duration_is_milliseconds_int(music_dir: Path):
     path = make_mp3(music_dir / "dur.mp3", seconds=3.0)
     meta = parse_track(path)

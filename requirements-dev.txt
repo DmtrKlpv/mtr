@@ -3,3 +3,5 @@
 pytest==9.0.1
 pytest-asyncio==1.4.0
 httpx==0.28.1
+# ffmpeg-бинарник для тестов: системный ffmpeg не нужен.
+imageio-ffmpeg==0.8.1

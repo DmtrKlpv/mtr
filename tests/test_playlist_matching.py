@@ -21,9 +21,7 @@ from app.playlists.matching import (
 from tests.conftest import make_mp3, tag_mp3
 
 
-# ----------------------------------------------------------------------
 # Нормализация
-# ----------------------------------------------------------------------
 def test_artist_variants_split_enumeration():
     assert artist_variants("Fallaout boy, Idx, Korasakov") == [
         "fallaout boy", "idx", "korasakov", "fallaout boy idx korasakov",
@@ -74,9 +72,7 @@ def test_normalize_filename_variants():
     assert normalize_filename("My favorite game (feat. Idx).mp3") == ["my favorite game"]
 
 
-# ----------------------------------------------------------------------
 # Индекс и варианты
-# ----------------------------------------------------------------------
 @pytest.fixture()
 async def indexed(ctx):
     """Библиотека: артист один, соавторы в названии."""
@@ -127,9 +123,7 @@ async def test_index_ignores_missing_tracks(indexed):
     assert fresh.size == 0
 
 
-# ----------------------------------------------------------------------
 # Импорт .m3u: приблизительные варианты не подставляются молча
-# ----------------------------------------------------------------------
 async def test_import_offers_variants_instead_of_guessing(indexed, tmp_path):
     index, ctx = indexed
     playlist = tmp_path / "mix.m3u8"
@@ -180,9 +174,7 @@ async def test_import_still_matches_exact_path_automatically(indexed, tmp_path):
     assert unmatched == []
 
 
-# ----------------------------------------------------------------------
 # Ресинк папок: похожие варианты предлагаются, но не применяются
-# ----------------------------------------------------------------------
 async def test_folder_resync_offers_similar_without_moving(ctx, tmp_path):
     """Пропавший трек с разъехавшимися тегами: предлагаем, но не переставляем."""
     from app.playlists import folder_sync

@@ -19,7 +19,6 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from app.playlists import importer
@@ -189,8 +188,3 @@ async def run_import(
         job.state, job.stage, job.error = "error", "error", str(exc)
     finally:
         job.finished_at = time.monotonic()
-
-
-def search_root_for(raw_dir: str, music_root: Path) -> Path:
-    """Корень поиска: пустая настройка = вся библиотека."""
-    return Path(raw_dir) if raw_dir else music_root

@@ -7,11 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from app.covers.prefetch import CoverPass
 from app.db.database import Database
 from app.db.migrations import _migrate_music
-from app.repositories.library import LibraryRepository
-from app.utils.activity import ActivityTracker, is_user_path
 from tests.conftest import make_mp3, tag_mp3
 
 
@@ -64,6 +61,5 @@ async def test_scan_batches_keep_results_and_isolate_bad_file(ctx, music_dir: Pa
 
 
 async def test_batch_size_does_not_change_results(ctx, music_dir: Path, monkeypatch):
-    from app.scanner import library_scanner
     for i in range(5):
-        p = make_mp3(music_dir / f"A{i}" / "t.mp3", seconds=0.2)
+        make_mp3(music_dir / f"A{i}" / "t.mp3", seconds=0.2)

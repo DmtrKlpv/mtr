@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
@@ -111,9 +110,7 @@ def test_read_playlist_empty_gives_error(tmp_path):
     assert error
 
 
-# ----------------------------------------------------------------------
 # Регрессия: плейлисты импортировались дважды
-# ----------------------------------------------------------------------
 def test_same_name_m3u_and_m3u8_collapse_to_one(tmp_path):
     """X.m3u и X.m3u8 — один плейлист, а не два.
 

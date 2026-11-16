@@ -16,7 +16,7 @@ from typing import Any
 from fastapi.responses import JSONResponse
 
 from app import __version__
-from app.subsonic.errors import ErrorCode, SubsonicError
+from app.subsonic.errors import SubsonicError
 
 # Имя сервера в поле type — клиенты показывают его в «О сервере».
 SERVER_TYPE = "mtr"
@@ -58,16 +58,3 @@ def error_response(
     body["status"] = "failed"
     body["error"] = {"code": error.code, "message": error.message}
     return JSONResponse({"subsonic-response": body}, status_code=status_code)
-
-
-def generic_error(
-    message: str | None = None,
-    *,
-    api_version: str,
-    code: int = ErrorCode.GENERIC,
-    status_code: int = 200,
-) -> JSONResponse:
-    """Ошибка без исключения — для мест, где удобнее вернуть сразу."""
-    return error_response(
-        SubsonicError(code, message), api_version=api_version, status_code=status_code
-    )

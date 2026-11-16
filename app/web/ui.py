@@ -243,9 +243,7 @@ async def root(request: Request) -> RedirectResponse:
     return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
 
 
-# ----------------------------------------------------------------------
 # Статика
-# ----------------------------------------------------------------------
 @router.get("/static/{filename}", include_in_schema=False, response_model=None)
 async def static_file(filename: str):
     """Отдаёт файлы интерфейса из app/web/static.

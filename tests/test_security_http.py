@@ -17,7 +17,6 @@ import pytest
 
 from app.security.http import (
     RedactSecretsFilter,
-    SecurityHeadersMiddleware,
     install_log_redaction,
     redact_url,
 )
@@ -32,9 +31,7 @@ def auth_q(password: str = PASSWORD) -> str:
     return f"u=admin&t={token}&s={SALT}&v=1.16.1&c=test&f=json"
 
 
-# ----------------------------------------------------------------------
 # Маскирование секретов
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -98,9 +95,7 @@ def test_install_is_idempotent():
     assert len(filters) == 1
 
 
-# ----------------------------------------------------------------------
 # HTTP: закрытые служебные эндпоинты
-# ----------------------------------------------------------------------
 @pytest.fixture
 async def api(settings, monkeypatch, music_dir):
     monkeypatch.setenv("MUSIC_DIR", str(settings.music_dir))
@@ -147,9 +142,7 @@ async def test_healthz_stays_open(api):
     assert r.json()["status"] == "ok"
 
 
-# ----------------------------------------------------------------------
 # Security-заголовки
-# ----------------------------------------------------------------------
 async def test_security_headers_present(api):
     client, _ = api
     r = await client.get("/healthz")
@@ -161,7 +154,6 @@ async def test_security_headers_present(api):
 async def test_csp_only_on_html(api):
     """CSP на аудио бессмыслен, на HTML — обязателен."""
     client, app = api
-    from app.api.stream_builder import build_stream_response
 
     r = await client.get("/login")
     assert r.status_code == 200
@@ -182,7 +174,7 @@ async def test_streaming_not_buffered_by_middleware(api):
     client, app = api
     from tests.conftest import make_flac
 
-    path = make_flac(Path(app.state.ctx.settings.music_dir) / "s.flac", seconds=1.0)
+    make_flac(Path(app.state.ctx.settings.music_dir) / "s.flac", seconds=1.0)
     await app.state.ctx.scanner.scan(mode="full")
     track = (await app.state.ctx.tracks.list_tracks())[0]
 
@@ -192,9 +184,7 @@ async def test_streaming_not_buffered_by_middleware(api):
     assert r.headers["x-mtr-strategy"] == "encode"
 
 
-# ----------------------------------------------------------------------
 # /docs: схема обязана строиться, CDN разрешён только там
-# ----------------------------------------------------------------------
 async def test_openapi_schema_builds(api):
     """Регрессия: аннотация без импорта ломала всю схему (500)."""
     client, _ = api

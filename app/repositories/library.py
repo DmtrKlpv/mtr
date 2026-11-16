@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from app.db.database import Database
 from app.repositories.tracks import TrackRow, _row_to_track
-from app.utils.alphabet import VALID
 
 logger = logging.getLogger(__name__)
 
@@ -167,17 +166,6 @@ WITH live_links AS (
 )
 """
 
-def _letter_clause(column: str, letter: str | None) -> str | None:
-    """Условие фильтра по букве рубрикатора. None — фильтра нет.
-
-    Буква подставляется параметром, а не в текст SQL. Рубрика считается в
-    Python (`mtr_letter`, см. app/db/database.py): SQLite без ICU не знает
-    кириллицу, а регэкспов не имеет вовсе.
-    """
-    if not letter or letter not in VALID:
-        return None
-    return f"mtr_letter({column}) = ?"
-
 
 class LibraryRepository:
     """Чтение альбомов, исполнителей и жанров."""
@@ -185,9 +173,7 @@ class LibraryRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    # ------------------------------------------------------------------
     # Альбомы
-    # ------------------------------------------------------------------
     async def list_albums(
         self,
         *,
@@ -197,7 +183,6 @@ class LibraryRepository:
         genre: str | None = None,
         from_year: int | None = None,
         to_year: int | None = None,
-        letter: str | None = None,
     ) -> list[AlbumRow]:
         """Список альбомов по типу сортировки из getAlbumList2."""
         order = ALBUM_SORTS.get(sort.lower())
@@ -221,11 +206,6 @@ class LibraryRepository:
         if to_year is not None:
             clauses.append("a.year <= ?")
             params.append(int(to_year))
-        # Рубрикатор: буква по названию альбома.
-        letter_sql = _letter_clause("a.name", letter)
-        if letter_sql:
-            clauses.append(letter_sql)
-            params.append(letter)
 
         # Фильтры по альбому: live-треки уже в JOIN live, поэтому здесь только атрибуты альбома.
         attr_clauses = [c for c in clauses if not c.startswith("(SELECT COUNT")]
@@ -236,21 +216,6 @@ class LibraryRepository:
         )
         rows = await self._db.fetch_all(sql, (*params, limit, offset))
         return [_row_to_album(row) for row in rows]
-
-    async def first_album_id(self, artist_id: int) -> int | None:
-        """id первого непустого альбома исполнителя — для аватара.
-
-        Обложек у исполнителей в схеме нет, поэтому берём обложку альбома.
-        Пустые альбомы (без треков) пропускаем: у них нет и картинки.
-        """
-        row = await self._db.fetch_one(
-            "SELECT a.id FROM albums a WHERE a.artist_id = ? "
-            "AND (SELECT COUNT(*) FROM tracks t "
-            "     WHERE t.album_id = a.id AND t.missing = 0) > 0 "
-            "ORDER BY a.year, a.name COLLATE NOCASE LIMIT 1",
-            (artist_id,),
-        )
-        return None if row is None else int(row["id"])
 
     async def get_album(self, album_id: int) -> AlbumRow | None:
         row = await self._db.fetch_one(f"{_ALBUM_SELECT} WHERE a.id = ?", (album_id,))
@@ -265,36 +230,21 @@ class LibraryRepository:
         )
         return [_row_to_track(row) for row in rows]
 
-    async def count_albums(self, *, letter: str | None = None) -> int:
-        """Сколько альбомов с живыми треками. С буквой — сколько в этой рубрике."""
-        letter_sql = _letter_clause("a.name", letter)
-        if letter_sql is None:
-            # Один проход по tracks, без подзапроса на альбом.
-            return int(
-                await self._db.fetch_value(
-                    "SELECT COUNT(DISTINCT album_id) FROM tracks "
-                    "WHERE missing = 0 AND album_id IS NOT NULL",
-                    default=0,
-                )
-                or 0
-            )
+    async def count_albums(self) -> int:
+        """Сколько альбомов с живыми треками."""
+        # Один проход по tracks, без подзапроса на альбом.
         return int(
             await self._db.fetch_value(
-                "SELECT COUNT(*) FROM albums a WHERE "
-                "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id "
-                " AND t.missing = 0) > 0 AND " + letter_sql,
-                (letter,),
+                "SELECT COUNT(DISTINCT album_id) FROM tracks "
+                "WHERE missing = 0 AND album_id IS NOT NULL",
                 default=0,
             )
             or 0
         )
 
-    # ------------------------------------------------------------------
     # Исполнители
-    # ------------------------------------------------------------------
     async def list_artists(
         self, *, limit: int | None = None, offset: int = 0,
-        letter: str | None = None,
     ) -> list[ArtistRow]:
         """Исполнители с хотя бы одним живым треком: владельцы и гости.
 
@@ -310,11 +260,6 @@ class LibraryRepository:
             """
         )
         params: list[object] = []
-        letter_sql = _letter_clause("ar.name", letter)
-        if letter_sql:
-            # WHERE, а не HAVING: условие по имени, а не по агрегату.
-            sql += f" WHERE {letter_sql}"
-            params.append(letter)
         sql += " GROUP BY ar.id, ar.name ORDER BY ar.name COLLATE NOCASE"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
@@ -329,26 +274,13 @@ class LibraryRepository:
             for row in rows
         ]
 
-    async def count_artists(self, *, letter: str | None = None) -> int:
-        """Исполнители с живым треком. С буквой — сколько в этой рубрике."""
-        letter_sql = _letter_clause("ar.name", letter)
-        if letter_sql is None:
-            return int(
-                await self._db.fetch_value(
-                    _LIVE_LINKS
-                    + "SELECT COUNT(DISTINCT artist_id) FROM live_links"
-                    " WHERE artist_id IS NOT NULL",
-                    default=0,
-                )
-                or 0
-            )
+    async def count_artists(self) -> int:
+        """Исполнители с живым треком."""
         return int(
             await self._db.fetch_value(
                 _LIVE_LINKS
-                + "SELECT COUNT(DISTINCT ar.id) FROM live_links ll"
-                " JOIN artists ar ON ar.id = ll.artist_id"
-                f" WHERE ll.artist_id IS NOT NULL AND {letter_sql}",
-                (letter,),
+                + "SELECT COUNT(DISTINCT artist_id) FROM live_links"
+                " WHERE artist_id IS NOT NULL",
                 default=0,
             )
             or 0
@@ -427,9 +359,7 @@ class LibraryRepository:
         )
         return [_row_to_album(row) for row in rows]
 
-    # ------------------------------------------------------------------
     # Жанры и поиск
-    # ------------------------------------------------------------------
     async def list_genres(self) -> list[tuple[str, int, int]]:
         """(жанр, число треков, число альбомов) — для getGenres."""
         rows = await self._db.fetch_all(
@@ -448,7 +378,9 @@ class LibraryRepository:
             for row in rows
         ]
 
-    async def search_albums(self, query: str, *, limit: int = 20) -> list[AlbumRow]:
+    async def search_albums(
+        self, query: str, *, limit: int = 20, with_genre: bool = False
+    ) -> list[AlbumRow]:
         like = _like(query)
         if like is None:
             return []
@@ -460,6 +392,13 @@ class LibraryRepository:
         # GROUP BY, а не подзапросом на каждый альбом. Прежний вариант на
         # 8000 альбомах и 120000 треках занимал 3.2 с и выглядел как зависание.
         limit = max(1, min(int(limit), 200))
+        genre_clause = (
+            " OR a.id IN (SELECT album_id FROM tracks WHERE missing = 0"
+            " AND album_id IS NOT NULL AND mtr_fold(genre) LIKE mtr_fold(?) ESCAPE '\\')"
+            if with_genre
+            else ""
+        )
+        args = (like, like, like, limit) if with_genre else (like, like, limit)
         rows = await self._db.fetch_all(
             """
             WITH matched AS (
@@ -467,7 +406,9 @@ class LibraryRepository:
                   FROM albums a
                   JOIN artists ar ON ar.id = a.artist_id
                  WHERE (mtr_fold(a.name)  LIKE mtr_fold(?) ESCAPE '\\'
-                     OR mtr_fold(ar.name) LIKE mtr_fold(?) ESCAPE '\\')
+                     OR mtr_fold(ar.name) LIKE mtr_fold(?) ESCAPE '\\'"""
+            + genre_clause
+            + """)
                  ORDER BY a.name COLLATE NOCASE
                  LIMIT ?
             ),
@@ -492,23 +433,35 @@ class LibraryRepository:
               JOIN live ON live.album_id = a.id
              ORDER BY a.name COLLATE NOCASE
             """,
-            (like, like, limit),
+            args,
         )
         return [_row_to_album(row) for row in rows]
 
-    async def search_artists(self, query: str, *, limit: int = 20) -> list[ArtistRow]:
+    async def search_artists(
+        self, query: str, *, limit: int = 20, with_genre: bool = False
+    ) -> list[ArtistRow]:
         like = _like(query)
         if like is None:
             return []
         limit = max(1, min(int(limit), 200))
         # Сначала отбор по имени среди исполнителей с живыми треками, затем агрегат.
+        # Исполнитель находится и по жанрам своих треков.
+        genre_clause = (
+            " OR ar.id IN (SELECT t.artist_id FROM tracks t WHERE t.missing = 0"
+            " AND t.artist_id IS NOT NULL AND mtr_fold(t.genre) LIKE mtr_fold(?) ESCAPE '\\')"
+            if with_genre
+            else ""
+        )
+        args = (like, like, limit) if with_genre else (like, limit)
         rows = await self._db.fetch_all(
             _LIVE_LINKS
             + """
             , matched AS (
                 SELECT ar.id, ar.name
                   FROM artists ar
-                 WHERE mtr_fold(ar.name) LIKE mtr_fold(?) ESCAPE '\\'
+                 WHERE (mtr_fold(ar.name) LIKE mtr_fold(?) ESCAPE '\\'"""
+            + genre_clause
+            + """)
                    AND ar.id IN (SELECT artist_id FROM live_links)
                  ORDER BY ar.name COLLATE NOCASE
                  LIMIT ?
@@ -520,7 +473,7 @@ class LibraryRepository:
              GROUP BY m.id, m.name
              ORDER BY m.name COLLATE NOCASE
             """,
-            (like, limit),
+            args,
         )
         return [
             ArtistRow(int(row["id"]), str(row["name"]), int(row["album_count"] or 0))

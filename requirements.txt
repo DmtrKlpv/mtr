@@ -1,8 +1,11 @@
-# Runtime-зависимости. Всё, что нужно контейнеру.
+# Runtime-зависимости контейнера.
+# uvicorn ставится без extras [standard]: он тянет uvloop и httptools, у которых
+# нет колёс под linux/arm/v7 (32-битный ARM). Поэтому websockets и watchfiles
+# перечислены явно, а uvloop и httptools подключаются маркером платформы.
+# Без них uvicorn работает на стандартном asyncio и h11: медленнее, но исправно.
 aiosqlite==0.22.1
 mutagen==1.48.1
-# Pillow нужен для уменьшения обложек до 600px при прогреве. На armv7 есть
-# готовое колесо на piwheels (12.1.0, cp313), поэтому --only-binary не падает.
+# Pillow: уменьшение обложек до 600px при прогреве; колесо cp313 есть и для armv7 (piwheels).
 Pillow==12.1.0
 cryptography==50.0.2
 fastapi==0.121.0
@@ -11,19 +14,3 @@ watchfiles==1.3.0
 websockets==15.0.1
 uvloop==0.22.1; platform_machine != "armv7l"
 httptools==0.7.1; platform_machine != "armv7l"
-
-
-# Runtime-зависимости. Всё, что нужно контейнеру.
-#
-# ВАЖНО про архитектуры. Колёс под linux/arm/v7 (32-битный ARM, Raspberry Pi
-# 2/3 в 32-битном режиме) нет у трёх пакетов: uvloop, httptools и pyyaml.
-# Без колёс pip пытается собрать их из исходников, для чего нужен компилятор
-# и заголовки — сборка падает.
-#
-# Поэтому:
-#   * uvicorn ставится БЕЗ extras [standard]: он тянет uvloop и httptools;
-#   * websockets и watchfiles перечислены явно — они нужны и имеют колёса
-#     под armv7;
-#   * uvloop и httptools подключаются маркером только там, где колёса есть.
-#     Это ускоряет amd64 и arm64, не ломая arm/v7. Без них uvicorn работает
-#     на стандартном asyncio и h11 — медленнее, но полностью исправно.

@@ -7,7 +7,6 @@ mutagen — так тесты проверяют именно тот код, к�
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import subprocess
@@ -141,11 +140,6 @@ def tag_flac(
     if genre:
         audio["genre"] = genre
     audio.save()
-
-
-@pytest.fixture(scope="session")
-def ffmpeg_available() -> bool:
-    return Path(FFMPEG).exists()
 
 
 @pytest.fixture

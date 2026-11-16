@@ -60,9 +60,7 @@ class WorkerRuntime:
         self._scan_tasks: set[asyncio.Task] = set()
         self._activity = FileActivity(stamp_path(ctx.settings.data_dir))
 
-    # ------------------------------------------------------------------
     # Фоновая фаза обложек: активность и параметры из настроек
-    # ------------------------------------------------------------------
     def attach_activity(self) -> None:
         """Подключает файл активности к фазе обложек вместо in-memory трекера."""
         self.ctx.cover_pass.set_activity(self._activity)
@@ -98,9 +96,7 @@ class WorkerRuntime:
             window, max_wait, interval, batch or "все",
         )
 
-    # ------------------------------------------------------------------
     # Команды
-    # ------------------------------------------------------------------
     async def handle_commands(self) -> int:
         """Обрабатывает необработанные команды по порядку. Возвращает их число."""
         rows = await self.ctx.music_db.fetch_all(
@@ -166,9 +162,7 @@ class WorkerRuntime:
         if self._scan_task is not None:
             await asyncio.wait({self._scan_task}, timeout=timeout)
 
-    # ------------------------------------------------------------------
     # Статус
-    # ------------------------------------------------------------------
     def _is_busy(self) -> bool:
         """Идёт ли работа, для которой нужен частый опрос."""
         if self._scan_tasks or self.ctx.scan_state.status == "running":
@@ -208,9 +202,7 @@ class WorkerRuntime:
         self._last_status_at = now
         return True
 
-    # ------------------------------------------------------------------
     # Цикл
-    # ------------------------------------------------------------------
     async def run(self, stop: asyncio.Event, *, parent_pid: int | None = None) -> None:
         """Основной цикл. Выходит по stop или когда родитель (веб) исчез."""
         await self.apply_settings()

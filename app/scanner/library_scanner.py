@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,8 +47,17 @@ SKIP_DIR_NAMES: Final[frozenset[str]] = frozenset(
 # Сколько файлов разбирать параллельно. mutagen — CPU+I/O, но диски
 # (особенно сетевые) не любят десятки параллельных чтений.
 PARSE_CONCURRENCY = 4
-# Размер батча для периодического прогресса.
-PROGRESS_EVERY = 25
+# Минимальный интервал между событиями прогресса разбора, секунды.
+PROGRESS_INTERVAL_SEC = 0.25
+# Сколько ждать разбор ОДНОГО файла. Сетевые хранилища иногда отдают файл
+# минутами (или не отдают вовсе): без предела такой файл держал слот и
+# оставлял счётчик на нуле, хотя скан работал.
+PARSE_TIMEOUT_SEC = 120.0
+# Как часто сторож отдаёт прогресс, пока ни один файл ещё не вернулся, секунды.
+WATCHDOG_INTERVAL_SEC = 1.0
+# Файл, который читается дольше этого, показываем в панели: на сетевом диске
+# так видно, что скан не встал, а ждёт конкретный файл.
+SLOW_FILE_SEC = 5.0
 # Файлов в одной транзакции записи. Меньше — чаще commit (медленнее, но короче блокировка).
 SCAN_BATCH = 100
 # Сколько ошибок отдавать в ответе на запуск скана (в историю пишется больше).
@@ -107,16 +118,21 @@ class Scanner:
         self._parse_concurrency = max(1, int(parse_concurrency))
         # 0 — обрабатывать все файлы одним заходом (прежнее поведение).
         self._batch_size = 0
+        self._parse_timeout_sec = PARSE_TIMEOUT_SEC
+        # Счётчики текущего захода: их читает сторож прогресса, поэтому они
+        # живут на объекте, а не в локальных переменных _parse_batch.
+        self._batch_total = 0
+        self._batch_parsed = 0
+        # path -> момент начала чтения: по нему считаем долгие файлы.
+        self._batch_started: dict[str, float] = {}
 
-    # ------------------------------------------------------------------
     # Публичное API
-    # ------------------------------------------------------------------
     def cancel(self) -> None:
         """Просит текущий проход остановиться после текущего файла."""
         self._cancelled = True
 
     def set_batch_size(self, value: int) -> None:
-        """Сколько треков брать за один заход (0 — все сразу).
+        """Сколько треков брать за один заход (0 — авто, SCAN_BATCH).
 
         Заходы идут строго последовательно: следующий начинается после записи
         предыдущего. На большой библиотеке маленькие заходы дают ровный прогресс
@@ -159,9 +175,7 @@ class Scanner:
         except Exception:  # noqa: BLE001 - хук не должен валить скан
             logger.exception("хук скана упал")
 
-    # ------------------------------------------------------------------
     # Внутренняя реализация
-    # ------------------------------------------------------------------
     async def _scan_locked(
         self, mode: str, *, paths: list[str] | None = None
     ) -> ScanResult:
@@ -362,33 +376,94 @@ class Scanner:
         """
         semaphore = asyncio.Semaphore(self._parse_concurrency)
         total = len(paths)
-        processed = 0
-        # Размер захода: из настроек (0 — все сразу, одним заходом).
-        step = self._batch_size if self._batch_size > 0 else max(total, 1)
+        # Заход ограничивает теги в памяти до записи; 0 в настройках — авто.
+        step = self._batch_size if self._batch_size > 0 else SCAN_BATCH
+        step = max(1, min(step, total or 1))
 
-        for start in range(0, total, step):
-            if self._cancelled:
-                break
-            chunk = paths[start:start + step]
+        # Считаем при разборе, а не при записи: иначе прогресс стоит на нуле весь заход.
+        self._batch_total = total
+        self._batch_parsed = 0
+        self._batch_started.clear()
+        last_emit = 0.0
+        # Сторож отдаёт прогресс даже когда ни один файл ещё не вернулся:
+        # иначе на медленном диске полоса выглядит зависшей на нуле.
+        watchdog = asyncio.create_task(
+            self._progress_watchdog(run_id, counters), name="scan-progress"
+        )
+        try:
+            for start in range(0, total, step):
+                if self._cancelled:
+                    break
+                chunk = paths[start:start + step]
 
-            async def parse_one(path: str):
-                async with semaphore:
-                    return path, await self._parse_file(path, counters)
+                async def parse_one(path: str):
+                    nonlocal last_emit
+                    async with semaphore:
+                        self._batch_started[path] = time.monotonic()
+                        try:
+                            item = path, await self._parse_file(path, counters)
+                        finally:
+                            self._batch_started.pop(path, None)
+                    # Вне семафора: отправка прогресса не занимает слот разбора.
+                    self._batch_parsed += 1
+                    # Итоговое значение отправляет emit после цикла.
+                    now = time.monotonic()
+                    if now - last_emit >= PROGRESS_INTERVAL_SEC and self._batch_parsed != total:
+                        last_emit = now
+                        await self._emit_progress(
+                            run_id, self._batch_parsed, total, counters
+                        )
+                    return item
 
-            parsed = await asyncio.gather(*(parse_one(p) for p in chunk))
+                parsed = await asyncio.gather(*(parse_one(p) for p in chunk))
 
-            async with self._repo.batch():
-                for path, meta in parsed:
-                    if meta is None:
-                        processed += 1
-                        continue
-                    await self._store_file(path, meta, counters)
-                    processed += 1
-                    if processed % PROGRESS_EVERY == 0 or processed == total:
-                        await self._emit_progress(run_id, processed, total, counters)
+                async with self._repo.batch():
+                    for path, meta in parsed:
+                        if meta is None:
+                            continue
+                        await self._store_file(path, meta, counters)
+        finally:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
 
-            if processed == total or processed % PROGRESS_EVERY == 0:
-                await self._emit_progress(run_id, processed, total, counters)
+        if total:
+            await self._emit_progress(run_id, self._batch_parsed, total, counters)
+
+    @property
+    def _batch_inflight(self) -> int:
+        """Сколько файлов читается прямо сейчас."""
+        return len(self._batch_started)
+
+    def _slow_files(self) -> list[dict[str, object]]:
+        """Файлы, которые читаются дольше SLOW_FILE_SEC, начиная с самых долгих.
+
+        Смысл: на сетевом диске один файл может тянуться минутами. Панель должна
+        показать его по имени, иначе выглядит, что сканирование не работает.
+        """
+        now = time.monotonic()
+        slow = [
+            {"path": path, "sec": round(now - started, 1)}
+            for path, started in self._batch_started.items()
+            if now - started >= SLOW_FILE_SEC
+        ]
+        slow.sort(key=lambda item: item["sec"], reverse=True)
+        return slow
+
+    async def _progress_watchdog(
+        self, run_id: int, counters: ScanCounters
+    ) -> None:
+        """Раз в секунду отдаёт прогресс, даже если ни один файл ещё не разобран.
+
+        Зачем: счётчик растёт только по возвращении файла. Один медленный файл
+        на сетевом хранилище останавливал полосу на нуле — выглядело как зависание,
+        хотя скан шёл.
+        """
+        while True:
+            await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+            await self._emit_progress(
+                run_id, self._batch_parsed, self._batch_total, counters
+            )
 
     async def _emit_progress(
         self, run_id: int, processed: int, total: int, counters: ScanCounters
@@ -399,6 +474,11 @@ class Scanner:
                 "run_id": run_id,
                 "processed": processed,
                 "total": total,
+                # Сколько файлов читается прямо сейчас: при нуле разобранных
+                # интерфейс показывает, что работа идёт.
+                "in_flight": self._batch_inflight,
+                # Долгие файлы: по ним видно, на чём именно стоит разбор.
+                "slow": self._slow_files(),
                 "added": counters.added,
                 "updated": counters.updated,
                 "failed": counters.failed,
@@ -413,7 +493,19 @@ class Scanner:
     async def _parse_file(self, path: str, counters: ScanCounters):
         """Чтение и разбор тегов одного файла (без записи в БД)."""
         try:
-            meta = await asyncio.to_thread(parse_track, path)
+            # Предел на один файл: поток по таймауту не убить, но слот
+            # освобождается и скан идёт дальше, а файл попадает в ошибки.
+            meta = await asyncio.wait_for(
+                asyncio.to_thread(parse_track, path),
+                timeout=self._parse_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            counters.add_error(
+                path,
+                f"таймаут разбора: файл не прочитан за {int(self._parse_timeout_sec)} с",
+            )
+            logger.warning("таймаут разбора %s", path)
+            return None
         except Exception as exc:  # noqa: BLE001 - парсер не должен бросать, но
             counters.add_error(path, f"{type(exc).__name__}: {exc}")
             logger.warning("не удалось разобрать %s: %s", path, exc)

@@ -108,9 +108,7 @@ class UserRepository:
         self._db = db
         self._cipher = cipher
 
-    # ------------------------------------------------------------------
     # Чтение
-    # ------------------------------------------------------------------
     async def get_by_id(self, user_id: int) -> UserRecord | None:
         row = await self._db.fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
         return _row_to_record(row) if row else None
@@ -140,9 +138,7 @@ class UserRepository:
             or 0
         )
 
-    # ------------------------------------------------------------------
     # Запись
-    # ------------------------------------------------------------------
     async def create_user(
         self,
         username: str,
@@ -339,9 +335,7 @@ class UserRepository:
             (utcnow_iso(), utcnow_iso(), user_id),
         )
 
-    # ------------------------------------------------------------------
     # Аутентификация
-    # ------------------------------------------------------------------
     async def verify_credentials(self, username: str, password: str) -> UserRecord | None:
         """Проверка логина/пароля для веб-входа. Возвращает только активных."""
         record = await self.get_by_username(username)
@@ -373,9 +367,7 @@ class UserRepository:
             )
             return None
 
-    # ------------------------------------------------------------------
     # Валидация
-    # ------------------------------------------------------------------
     @staticmethod
     def _validate_password(password: str) -> None:
         if not isinstance(password, str):

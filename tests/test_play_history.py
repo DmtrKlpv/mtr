@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 
 import httpx
-import pytest
 
 from tests.test_web import PASSWORD, USER_PASSWORD, login, login_admin, web  # noqa: F401
 

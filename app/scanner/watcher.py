@@ -137,9 +137,7 @@ class LibraryWatcher:
         self._last_result: ScanResult | None = None
         self._state = "idle"
 
-    # ------------------------------------------------------------------
     # Публичное состояние (для Subsonic getScanStatus и отладки)
-    # ------------------------------------------------------------------
     @property
     def state(self) -> str:
         return self._state
@@ -176,9 +174,7 @@ class LibraryWatcher:
                     task.cancel()
                     self._tasks.remove(task)
 
-    # ------------------------------------------------------------------
     # Жизненный цикл
-    # ------------------------------------------------------------------
     async def start(self) -> None:
         if self._tasks:
             return
@@ -208,9 +204,7 @@ class LibraryWatcher:
         self._state = "stopped"
         logger.info("наблюдение остановлено")
 
-    # ------------------------------------------------------------------
     # Циклы
-    # ------------------------------------------------------------------
     async def _watch_loop(self) -> None:
         """Читает события watchfiles, фильтрует и кладёт в очередь.
 

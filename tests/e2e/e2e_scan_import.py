@@ -18,8 +18,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1500)
 
     def go(view):
-        page.click("#menu-toggle"); page.wait_for_timeout(300)
-        page.click(f".menu-item[data-view='{view}']"); page.wait_for_timeout(1400)
+        page.click(f".rail-btn[data-view='{view}']"); page.wait_for_timeout(1400)
 
     # 1. БАГ СО СКРИНШОТА
     go("settings")

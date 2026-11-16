@@ -136,9 +136,7 @@ def _version() -> str:
     return __version__
 
 
-# ----------------------------------------------------------------------
 # Сессия
-# ----------------------------------------------------------------------
 @router.get("/session")
 async def whoami(
     session: SessionRecord = Depends(current_session),
@@ -170,9 +168,7 @@ async def logout(
     return response
 
 
-# ----------------------------------------------------------------------
 # Библиотека
-# ----------------------------------------------------------------------
 @router.get("/stats")
 async def stats(
     ctx: AppContext = Depends(get_ctx),
@@ -211,11 +207,9 @@ async def albums(
     session: SessionRecord = Depends(current_session),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
-    """Альбомы страницей. `letter` — рубрика алфавита («0-9», «A»…«Я», «Другие»)."""
-    mark = letter or None
-    rows = await ctx.library.list_albums(limit=limit, offset=offset, letter=mark)
+    """Альбомы страницей."""
+    rows = await ctx.library.list_albums(limit=limit, offset=offset)
     return _ok(
         {
             "items": [
@@ -230,10 +224,9 @@ async def albums(
             ],
             # Сколько всего: нужно, чтобы интерфейс знал, есть ли следующая
             # страница, и не тянул сразу все 9000 альбомов.
-            "total": await ctx.library.count_albums(letter=mark),
+            "total": await ctx.library.count_albums(),
             "limit": limit,
             "offset": offset,
-            "letter": letter,
         }
     )
 
@@ -283,10 +276,12 @@ async def search(
 ) -> JSONResponse:
     text = q.strip()
     if not text:
-        return _ok({"tracks": [], "albums": [], "artists": []})
-    tracks = await ctx.tracks.search(text, limit=50)
-    albums = await ctx.library.search_albums(text, limit=20)
-    artists = await ctx.library.search_artists(text, limit=20)
+        return _ok({"tracks": [], "albums": [], "artists": [], "playlists": []})
+    tracks = await ctx.tracks.search(text, limit=100, with_genre=True)
+    albums = await ctx.library.search_albums(text, limit=50, with_genre=True)
+    artists = await ctx.library.search_artists(text, limit=50, with_genre=True)
+    album_map = await ctx.library.artist_album_map([a.id for a in artists])
+    playlists = await ctx.playlists.search(session.user.id, text, limit=50)
     return _ok(
         {
             "tracks": [
@@ -305,7 +300,19 @@ async def search(
                 {"id": album.id, "name": album.name, "artist": album.artist_name}
                 for album in albums
             ],
-            "artists": [{"id": a.id, "name": a.name} for a in artists],
+            "artists": [
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "album_count": a.album_count,
+                    "album_id": album_map.get(a.id),
+                }
+                for a in artists
+            ],
+            "playlists": [
+                {"id": p.id, "name": p.name, "song_count": p.song_count}
+                for p in playlists
+            ],
         }
     )
 
@@ -503,16 +510,13 @@ async def scan_history(
     })
 
 
-# ----------------------------------------------------------------------
 # Плейлисты
-# ----------------------------------------------------------------------
 @router.get("/playlists")
 async def list_playlists(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
-    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
-    rows = await ctx.playlists.list_visible(session.user.id, letter=letter or None)
+    rows = await ctx.playlists.list_visible(session.user.id)
     return _ok(
         {
             "items": [
@@ -527,7 +531,6 @@ async def list_playlists(
                 for playlist in rows
             ],
             "total": len(rows),
-            "letter": letter,
         }
     )
 
@@ -656,9 +659,7 @@ async def toggle_playlist_public(
     return _ok({"id": playlist_id, "is_public": is_public})
 
 
-# ----------------------------------------------------------------------
 # Пользователи (только admin)
-# ----------------------------------------------------------------------
 @router.get("/users")
 async def list_users(
     ctx: AppContext = Depends(get_ctx),
@@ -767,9 +768,7 @@ async def delete_user(
     return _ok({"deleted": user_id})
 
 
-# ----------------------------------------------------------------------
 # Сервер (только admin)
-# ----------------------------------------------------------------------
 @router.get("/server")
 async def server_info(
     ctx: AppContext = Depends(get_ctx),
@@ -903,9 +902,7 @@ async def revoke_my_session(
     return _ok({"revoked": session_id})
 
 
-# ----------------------------------------------------------------------
 # Плейлисты: состав, добавление/удаление треков, переупорядочивание
-# ----------------------------------------------------------------------
 def _track_json(track) -> dict:
     return {
         "id": track.id,
@@ -1019,9 +1016,7 @@ async def rename_playlist(
     return _ok({"id": updated.id, "name": updated.name})
 
 
-# ----------------------------------------------------------------------
 # Избранное и оценки текущего пользователя
-# ----------------------------------------------------------------------
 @router.get("/starred")
 async def starred_tracks(
     ctx: AppContext = Depends(get_ctx),
@@ -1075,20 +1070,16 @@ async def starred_ids(
     return _ok({"ids": [int(row["track_id"]) for row in rows]})
 
 
-# ----------------------------------------------------------------------
 # Исполнители (для вида «Исполнители»)
-# ----------------------------------------------------------------------
 @router.get("/artists")
 async def list_artists(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
     limit: int = Query(60, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    letter: str = Query("", max_length=8),
 ) -> JSONResponse:
     """Исполнители страницей. Пустые (без альбомов) отфильтрованы в SQL."""
-    mark = letter or None
-    rows = await ctx.library.list_artists(limit=limit, offset=offset, letter=mark)
+    rows = await ctx.library.list_artists(limit=limit, offset=offset)
     # Обложки исполнителей в схеме нет, аватар берёт картинку первого
     # альбома. Раньше это был отдельный запрос на каждого исполнителя —
     # на 5000 записей выходило 5000 обращений; теперь один запрос на страницу.
@@ -1106,10 +1097,9 @@ async def list_artists(
                 }
                 for artist in rows
             ],
-            "total": await ctx.library.count_artists(letter=mark),
+            "total": await ctx.library.count_artists(),
             "limit": limit,
             "offset": offset,
-            "letter": letter,
         }
     )
 
@@ -1139,9 +1129,7 @@ async def artist_detail(
     )
 
 
-# ----------------------------------------------------------------------
 # Настройки сервера (только admin)
-# ----------------------------------------------------------------------
 @router.get("/settings")
 async def get_settings(
     ctx: AppContext = Depends(get_ctx),
@@ -1256,9 +1244,7 @@ async def _refresh_runtime_settings(ctx: AppContext) -> None:
     await enqueue(ctx.music_db, "reload")
 
 
-# ----------------------------------------------------------------------
 # Пользовательские предпочтения (доступны всем авторизованным)
-# ----------------------------------------------------------------------
 @router.get("/prefs")
 async def get_prefs(
     ctx: AppContext = Depends(get_ctx),
@@ -1277,9 +1263,7 @@ async def get_prefs(
         }
     )
 
-# ----------------------------------------------------------------------
 # Импорт плейлистов из папки
-# ----------------------------------------------------------------------
 def _import_item(path: str, name: str):
     """Элемент прогресса импорта: состояние одного плейлиста."""
     from app.playlists.import_jobs import ImportItem

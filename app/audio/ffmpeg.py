@@ -99,9 +99,7 @@ class TranscodeStream:
         self._closed = False
         self.pid: int | None = None
 
-    # ------------------------------------------------------------------
     # Запуск
-    # ------------------------------------------------------------------
     def start(self) -> None:
         """Синхронный запуск. Ошибки превращаются в TranscodeError до ответа клиенту."""
         self._stderr = tempfile.TemporaryFile()
@@ -129,9 +127,7 @@ class TranscodeStream:
             self._stderr = None
         self._fire_on_close()
 
-    # ------------------------------------------------------------------
     # Чтение
-    # ------------------------------------------------------------------
     async def iterate(self) -> AsyncIterator[bytes]:
         """Отдаёт байты из stdout. Гарантированно вызывает aclose()."""
         if self._proc is None or self._proc.stdout is None:
@@ -154,9 +150,7 @@ class TranscodeStream:
         finally:
             await self.aclose()
 
-    # ------------------------------------------------------------------
     # Остановка
-    # ------------------------------------------------------------------
     async def aclose(self) -> None:
         """Идемпотентная остановка. Вызывается при любом исходе."""
         if self._closed:

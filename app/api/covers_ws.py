@@ -120,9 +120,7 @@ async def cover_stats(
     return JSONResponse(stats)
 
 
-# ----------------------------------------------------------------------
 # WebSocket: прогресс сканирования
-# ----------------------------------------------------------------------
 @router.websocket("/ws/scan")
 async def scan_progress(websocket: WebSocket) -> None:
     """Транслирует состояние сканера.

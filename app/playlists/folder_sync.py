@@ -2,8 +2,8 @@
 
 Два сценария, оба работают только с БД медиатеки (mtr_music.db):
 
-1. ``scan_folder_to_playlist`` — рекурсивно обходит папку (например,
-   ``/music/Дискографии/Artist1``), находит аудиофайлы и собирает ОДИН плейлист.
+1. ``scan_folder_to_playlists`` — для каждой подпапки папки (например,
+   ``/music/Дискографии``) собирает свой плейлист из её аудиофайлов, рекурсивно.
    В плейлист пишутся ссылки на ``tracks.id``, а не пути. Файл сопоставляется
    с треком по относительному/абсолютному пути (батч-запросом ``IN``).
    Порядок: имя подпапки → номер диска → номер трека → имя файла.
@@ -66,9 +66,7 @@ class FolderSyncError(Exception):
         self.message = message
 
 
-# ----------------------------------------------------------------------
 # Прогресс: общий объект для UI (опрос раз в секунду, как у прогрева обложек)
-# ----------------------------------------------------------------------
 @dataclass
 class Job:
     id: str
@@ -150,9 +148,7 @@ class PlanStore:
             self._plans.pop(key, None)
 
 
-# ----------------------------------------------------------------------
 # Файловая часть (блокирующая — вызывается через asyncio.to_thread)
-# ----------------------------------------------------------------------
 def validate_folder(raw: str, music_root: Path) -> Path:
     """Проверяет, что путь — папка внутри корня медиатеки.
 
@@ -203,6 +199,16 @@ def walk_audio(root: Path) -> list[tuple[str, float]]:
     return found
 
 
+def list_subfolders(music_root: Path) -> list[dict[str, str]]:
+    if not music_root.is_dir():
+        return []
+    subfolders = sorted(
+        (p for p in music_root.iterdir() if p.is_dir() and not p.name.startswith(".")),
+        key=lambda p: p.name.casefold(),
+    )
+    return [{"name": p.name, "path": str(p)} for p in subfolders]
+
+
 def tree_latest_mtime(root: Path) -> float:
     """Самое позднее изменение в дереве: файлы и папки.
 
@@ -222,9 +228,7 @@ def tree_latest_mtime(root: Path) -> float:
     return latest
 
 
-# ----------------------------------------------------------------------
 # БД: батч-запросы
-# ----------------------------------------------------------------------
 _TRACK_COLS = (
     "id, path, title, artist, album, album_id, track_number, disc_number, "
     "duration_ms, size_bytes, content_hash, missing"
@@ -294,9 +298,7 @@ async def tracks_by_tags(
     return out
 
 
-# ----------------------------------------------------------------------
 # Сортировка
-# ----------------------------------------------------------------------
 def subfolder_key(track_path: str, root: str) -> str:
     """Относительный путь папки трека от корня плейлиста ('' — лежит в корне)."""
     try:
@@ -322,9 +324,7 @@ def sort_key(row: dict, root: str) -> tuple:
     )
 
 
-# ----------------------------------------------------------------------
 # Сценарий 1: папка → плейлист
-# ----------------------------------------------------------------------
 @dataclass
 class ScanResult:
     playlist_id: int
@@ -332,7 +332,6 @@ class ScanResult:
     folder: str
     files_found: int
     matched: int
-    unmatched: list[str]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -341,34 +340,68 @@ class ScanResult:
             "folder": self.folder,
             "files_found": self.files_found,
             "matched": self.matched,
+        }
+
+
+@dataclass
+class FolderScanResult:
+    folder: str
+    playlists: list[ScanResult]
+    already_synced: list[str]
+    loose_files: int
+    unmatched: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "folder": self.folder,
+            "playlists": [p.as_dict() for p in self.playlists],
+            "already_synced": self.already_synced,
+            "loose_files": self.loose_files,
             "unmatched_count": len(self.unmatched),
             "unmatched": self.unmatched[:100],
         }
 
 
-async def scan_folder_to_playlist(
+def _group_by_subfolder(root: Path, paths: list[str]) -> tuple[dict[Path, list[str]], int]:
+    subfolders = sorted(
+        (p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")),
+        key=lambda p: p.name.casefold(),
+    )
+    if not subfolders:
+        return {root: paths}, 0
+    groups: dict[Path, list[str]] = {sub: [] for sub in subfolders}
+    loose = 0
+    for path in paths:
+        parts = os.path.relpath(path, root).split(os.sep, 1)
+        if len(parts) == 1:
+            loose += 1
+        else:
+            groups[root / parts[0]].append(path)
+    return {sub: group for sub, group in groups.items() if group}, loose
+
+
+async def scan_folder_to_playlists(
     *,
     db: Database,
     playlists: PlaylistRepository,
     music_root: Path,
     folder: str,
     owner_id: int,
-    name: str | None = None,
     job: Job | None = None,
-) -> ScanResult:
-    """Собирает один плейлист из всех аудиофайлов папки.
+) -> FolderScanResult:
+    """Для каждой подпапки папки — свой плейлист из всех её аудиофайлов, рекурсивно.
 
-    Файлы, которых нет в медиатеке, не добавляются, а перечисляются в
-    ``unmatched``: обычно это значит, что сервер ещё не просканировал папку.
+    Подпапка, из которой плейлист уже собран этим пользователем, пропускается:
+    её обновляет ресинк. Если подпапок нет, плейлист собирается из самой папки.
     """
     root = validate_folder(folder, music_root)
     root_str = str(root)
-    playlist_name = (name or "").strip() or root.name
 
     if job:
         job.stage = "Обход папки…"
     files = await asyncio.to_thread(walk_audio, root)
-    paths = [p for p, _ in files]
+    groups, loose = _group_by_subfolder(root, [p for p, _ in files])
+    paths = [p for group in groups.values() for p in group]
     if job:
         job.total = len(paths)
         job.stage = "Сопоставление с медиатекой…"
@@ -379,39 +412,60 @@ async def scan_folder_to_playlist(
         if job:
             job.done = min(job.done + len(batch), len(paths))
 
-    rows = [found[p] for p in paths if p in found and not found[p]["missing"]]
-    unmatched = [p for p in paths if p not in found or found[p]["missing"]]
-    rows.sort(key=lambda r: sort_key(r, root_str))
+    synced = {
+        row["origin_folder_path"]
+        for row in await db.fetch_all(
+            "SELECT origin_folder_path FROM playlists "
+            "WHERE owner_id = ? AND origin_folder_path IS NOT NULL",
+            (owner_id,),
+        )
+    }
 
     if job:
-        job.stage = "Создание плейлиста…"
-    track_ids = [int(r["id"]) for r in rows]
+        job.stage = "Создание плейлистов…"
+    created: list[ScanResult] = []
+    already: list[str] = []
+    unmatched: list[str] = []
     async with db.transaction():
-        playlist = await playlists.create(
-            owner_id, playlist_name, track_ids=track_ids,
-        )
-        await db.execute(
-            "UPDATE playlists SET origin_folder_path = ?, synced_at = ? WHERE id = ?",
-            (root_str, utcnow_iso(), playlist.id),
-        )
+        for child, group in groups.items():
+            key = str(child)
+            if key in synced:
+                already.append(key)
+                continue
+            rows = [found[p] for p in group if p in found and not found[p]["missing"]]
+            unmatched.extend(p for p in group if p not in found or found[p]["missing"])
+            if not rows:
+                continue
+            rows.sort(key=lambda r: sort_key(r, key))
+            playlist = await playlists.create(
+                owner_id, child.name, track_ids=[int(r["id"]) for r in rows],
+            )
+            await db.execute(
+                "UPDATE playlists SET origin_folder_path = ?, synced_at = ? WHERE id = ?",
+                (key, utcnow_iso(), playlist.id),
+            )
+            created.append(ScanResult(
+                playlist_id=playlist.id,
+                name=child.name,
+                folder=key,
+                files_found=len(group),
+                matched=len(rows),
+            ))
 
     logger.info(
-        "плейлист %r из %s: %d треков, не в медиатеке %d",
-        playlist_name, root_str, len(track_ids), len(unmatched),
+        "сборка из %s: плейлистов %d, уже собраны %d, не в медиатеке %d",
+        root_str, len(created), len(already), len(unmatched),
     )
-    return ScanResult(
-        playlist_id=playlist.id,
-        name=playlist_name,
+    return FolderScanResult(
         folder=root_str,
-        files_found=len(paths),
-        matched=len(track_ids),
+        playlists=created,
+        already_synced=already,
+        loose_files=loose,
         unmatched=unmatched,
     )
 
 
-# ----------------------------------------------------------------------
 # Сценарий 2: ресинк
-# ----------------------------------------------------------------------
 def _parse_iso(value: str | None) -> float | None:
     if not value:
         return None

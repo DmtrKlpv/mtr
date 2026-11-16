@@ -337,6 +337,17 @@ function updateScanView(current) {
   if (current.status === 'running' || current.to_parse) {
     pieces.push(`разобрано ${current.processed || 0} из ${current.to_parse || 0}`);
   }
+  // Пока ни один файл не вернулся (или чтение идёт), показываем, сколько
+  // читается: иначе на медленном диске выглядит, что скан встал.
+  if (running && current.in_flight) {
+    pieces.push(`читается ${current.in_flight}`);
+  }
+  // Файл, который тянется дольше порога: имя и сколько уже ждём.
+  if (running && Array.isArray(current.slow) && current.slow.length) {
+    const worst = current.slow[0];
+    const name = String(worst.path || '').split('/').pop();
+    pieces.push(`долго: ${name} · ${Math.round(worst.sec)} с`);
+  }
   if (current.seen) pieces.push(`найдено файлов ${current.seen}`);
   if (current.added) pieces.push(`новых ${current.added}`);
   if (current.updated) pieces.push(`обновлено ${current.updated}`);

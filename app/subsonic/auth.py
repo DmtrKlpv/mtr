@@ -271,25 +271,3 @@ async def _resolve_user(
             logger.exception("не удалось перешифровать пароль %r", username)
 
     return record
-
-    # Вариант с параметром p.
-    assert password is not None
-    supplied = str(password)
-    if supplied.startswith("enc:"):
-        hex_part = supplied[4:]
-        try:
-            decoded = bytes.fromhex(hex_part).decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise SubsonicError(
-                ErrorCode.GENERIC, "Invalid hex encoding in parameter p"
-            ) from exc
-        supplied = decoded
-    else:
-        logger.warning(
-            "клиент %s передал пароль в открытом виде (параметр p) — "
-            "используйте токен t+s", params.get("c", "?"),
-        )
-
-    if not hmac.compare_digest(supplied, expected):
-        raise SubsonicError(ErrorCode.WRONG_CREDENTIALS)
-    return record

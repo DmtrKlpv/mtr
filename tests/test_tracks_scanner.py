@@ -8,15 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
-from app.repositories.tracks import ScanCounters
 from tests.conftest import make_flac, make_mp3, tag_flac, tag_mp3
 
 
-# ----------------------------------------------------------------------
 # Upsert и справочники
-# ----------------------------------------------------------------------
 async def test_upsert_insert_then_unchanged(ctx, music_dir: Path):
     path = make_mp3(music_dir / "a.mp3")
     tag_mp3(path, title="A", artist="Artist")
@@ -76,9 +72,7 @@ async def test_play_stats_row_created(ctx, music_dir: Path):
     assert row["play_count"] == 0
 
 
-# ----------------------------------------------------------------------
 # ГЛАВНЫЙ ИНВАРИАНТ: id стабилен между ресканами
-# ----------------------------------------------------------------------
 async def test_full_rescan_preserves_track_ids_and_playlists(ctx, music_dir: Path):
     path = make_mp3(music_dir / "keep.mp3")
     tag_mp3(path, title="Keep Me", artist="A")
@@ -139,9 +133,7 @@ async def test_modified_file_updates_in_place(ctx, music_dir: Path):
     assert tracks[0].title == "After"
 
 
-# ----------------------------------------------------------------------
 # Пометка missing вместо удаления
-# ----------------------------------------------------------------------
 async def test_deleted_file_marked_missing_not_removed(ctx, music_dir: Path):
     path = make_mp3(music_dir / "gone.mp3")
     tag_mp3(path, title="Gone")
@@ -195,9 +187,7 @@ async def test_returning_file_clears_missing(ctx, music_dir: Path):
     assert refreshed.missing is False
 
 
-# ----------------------------------------------------------------------
 # Обработка ошибок в пачке
-# ----------------------------------------------------------------------
 async def test_broken_file_does_not_stop_scan(ctx, music_dir: Path):
     good = make_mp3(music_dir / "good.mp3")
     tag_mp3(good, title="Good")
@@ -254,9 +244,7 @@ async def test_nested_directories_walked(ctx, music_dir: Path):
     assert (await ctx.tracks.list_tracks())[0].title == "Deep"
 
 
-# ----------------------------------------------------------------------
 # Поиск и статистика
-# ----------------------------------------------------------------------
 async def test_search(ctx, music_dir: Path):
     p1 = make_mp3(music_dir / "1.mp3")
     tag_mp3(p1, title="Moonlight Sonata", artist="Beethoven", album="Piano")
@@ -296,9 +284,7 @@ async def test_purge_missing_removes_rows(ctx, music_dir: Path):
     assert await ctx.tracks.count_tracks(include_missing=True) == 0
 
 
-# ----------------------------------------------------------------------
 # Транзакции
-# ----------------------------------------------------------------------
 async def test_nested_transaction_rollback(ctx):
     """Вложенная транзакция не открывает второй BEGIN и откатывается."""
     await ctx.music_db.execute(

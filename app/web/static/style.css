@@ -179,45 +179,6 @@ a { color: inherit; text-decoration: none; }
 /* ---------- Шапка: только имя пользователя ---------- */
 
 
-/* ---------- Меню настроек ---------- */
-
-.menu {
-  position: absolute;
-  top: calc(100vh - var(--player-h) - 12px);
-  left: calc(var(--rail-w) + 8px);
-  transform: translateY(-100%);
-  background: var(--panel-2);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-lg);
-  padding: 6px;
-  min-width: 200px;
-  z-index: 40;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, .6);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.menu[hidden] { display: none; }
-
-.menu-item {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
-}
-.menu-item:hover { background: var(--hover); }
-.menu-item[hidden] { display: none; }
-
 /* ---------- Контент ---------- */
 
 .view {
@@ -439,7 +400,7 @@ select { border-radius: var(--radius); }
 input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
-  background: var(--panel-3);
+  background-color: var(--panel-3);
 }
 input::placeholder { color: var(--muted-2); }
 input.wide { width: 100%; }
@@ -450,7 +411,7 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
   flex: 1;
   min-width: 240px;
   padding-left: 42px;
-  background-image: url("/static/icons/search.svg");
+  background-image: url("/static/icons/search-white.svg");
   background-repeat: no-repeat;
   background-position: 14px center;
   background-size: 17px;
@@ -517,28 +478,21 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
 .segment.active { background: var(--accent); color: var(--accentlight); font-weight: 600; }
 .segment.active:hover { background: var(--accent-dark); }
 
-/* ---------- Алфавитный рубрикатор ---------- */
-
-.alpha-bar {
+.search-split {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 24px;
+  align-items: start;
+}
+.search-col { min-width: 0; }
+.search-col-head {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 16px;
+  align-items: center;
+  gap: 10px;
+  min-height: 41px;
+  margin-bottom: 18px;
 }
-.alpha-btn {
-  min-width: 28px;
-  height: 26px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 26px;
-  cursor: pointer;
-}
-.alpha-btn:hover { background: var(--hover); color: var(--text); }
-.alpha-btn.active { background: var(--accent); color: var(--accentlight); font-weight: 600; }
+.search-col-head h3 { margin: 0; }
 
 /* ---------- Альбомы ---------- */
 
@@ -968,35 +922,27 @@ label.inline {
   width: 22px; height: 22px;
   flex: none;
   font-weight: 700;
-  border-radius: 50%;
+  color: #fff;
 }
-.import-status.created, .import-status.merged, .import-status.replaced {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-.import-status.error { color: var(--danger); background: rgba(255, 95, 95, .14); }
-.import-status.skipped { color: var(--muted); }
-/* Ожидание больше не крутится спиннером: жёлтый знак вопроса означает
-   «ещё не обработан», и по нему спокойно видно, что процесс идёт. */
-.import-status.pending {
-  color: var(--warn, #f0b429);
-  background: rgba(240, 180, 41, .14);
-  background-image: url("/static/icons/help.svg");
-  background-size: 15px 15px;
-  background-position: center;
-  background-repeat: no-repeat;
-  font-size: 0;
-}
-.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped):not(.pending) {
-  color: var(--warn, #f0b429);
-  background: rgba(240, 180, 41, .14);
-  background-image: url("/static/icons/help.svg");
-  background-size: 15px 15px;
-  background-position: center;
-  background-repeat: no-repeat;
+/* Ожидание и неизвестный статус — знак вопроса маской: currentColor внутри SVG-фона не наследуется. */
+.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped) {
+  background: currentColor;
+  -webkit-mask: url("/static/icons/help.svg") center / 15px no-repeat;
+  mask: url("/static/icons/help.svg") center / 15px no-repeat;
   font-size: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.search-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  vertical-align: -2px;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
 
 .unmatched { margin-top: 10px; }
 .unmatched summary { cursor: pointer; font-size: var(--fs-small); color: var(--accent); }
@@ -1219,12 +1165,11 @@ label.inline {
   bottom: 0;
   height: var(--player-h);
   display: grid;
-  /* Левая часть шире: три строки текста (исполнитель, трек, альбом) в одну
-     колонку иначе обрезаются на средней ширине окна. */
-  grid-template-columns: minmax(0, 2fr) minmax(260px, 1.5fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
-  padding: 0 24px 0 calc(var(--rail-w) + 10px);
+  column-gap: 18px;
+  padding: 0 24px;
   background: var(--rail);
   border-top: 1px solid var(--line);
   z-index: 30;
@@ -1232,6 +1177,9 @@ label.inline {
 .player[hidden] { display: none; }
 
 .player-track {
+  grid-column: 1;
+  grid-row: 2;
+  margin-left: calc(var(--rail-w) - 14px);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1290,14 +1238,18 @@ label.inline {
 .player-album { font-size: 12px; }
 .player-album:not(:disabled):hover { color: var(--accent); }
 
+/* Три равные колонки: кнопки стоят строго по центру плеера, время —
+   в правой колонке. Раньше #time висело абсолютно справа от центра и
+   сдвигало кнопки влево. */
 .player-center {
-  display: flex;
-  flex-direction: column;
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 6px;
   min-width: 0;
-  width: 100%;
 }
+.player-center .controls { grid-column: 2; justify-self: center; }
 .controls { display: flex; align-items: center; gap: 6px; }
 .play-btn {
   background: var(--accent);
@@ -1310,24 +1262,68 @@ label.inline {
 .play-btn:hover { background: var(--accent-dark); }
 .play-btn .icon { width: 20px; height: 20px; filter: none; opacity: 1; }
 
-.player-progress {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
+.player-seek {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  margin: 0 -24px 0 calc(var(--rail-w) - 24px);
+  min-width: 0;
 }
 #seek {
-  flex: 1;
-  min-width: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 16px;
+  margin: 0;
   padding: 0;
   border: 0;
+  border-radius: 0;
   background: transparent;
-  accent-color: var(--accent);
-  height: 16px;
+  cursor: pointer;
+}
+#seek::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 0;
+  background: linear-gradient(to right, var(--accent) var(--seek-fill, 0%), var(--line-2) var(--seek-fill, 0%));
+}
+#seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 0;
+  background: var(--accent);
+}
+#seek::-moz-range-track {
+  height: 4px;
+  border-radius: 0;
+  background: var(--line-2);
+}
+#seek::-moz-range-progress {
+  height: 4px;
+  border-radius: 0;
+  background: var(--accent);
+}
+#seek::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 0;
+  background: var(--accent);
+}
+#time {
+  grid-column: 3;
+  justify-self: start;
+  margin-left: 14px;
+  white-space: nowrap;
 }
 #seek:focus { outline: none; }
 
 .player-right {
+  grid-column: 3;
+  grid-row: 2;
+  justify-self: end;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1347,18 +1343,26 @@ label.inline {
   :root { --rail-w: 64px; --player-h: 200px; --player-gap: 24px; }
   .rail-btn { width: 42px; height: 42px; }
   .two-col { grid-template-columns: 1fr; }
+  .search-split { grid-template-columns: 1fr; }
   .kv { grid-template-columns: 1fr; gap: 4px 0; }
   .kv > span:nth-child(odd) { margin-top: 10px; }
   .album-hero { grid-template-columns: 1fr; }
   .album-hero-title { font-size: 26px; }
   .player {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto;
+    grid-template-rows: auto;
     height: auto;
     min-height: var(--player-h);
     padding: 10px 14px calc(10px + env(safe-area-inset-bottom)) 14px;
     gap: 8px;
   }
+  .player-seek, .player-track, .player-center, .player-right { grid-column: 1; grid-row: auto; }
+  .player-seek { margin: 0 -14px 0 calc(var(--rail-w) - 14px); }
+  .player-track { margin-left: 0; }
+  /* Сетку не переопределяем: колонки 1fr auto 1fr держат кнопки ровно
+     по центру экрана и на телефоне. Время — в правой колонке. */
+  .player-center { justify-self: stretch; }
+  #time { justify-self: start; margin-left: 10px; }
   .player-track { justify-content: center; }
   /* На телефоне плеер в одну колонку: строки центрируем вместе с обложкой,
      иначе три разной длины подписи «пляшут» по ширине. */

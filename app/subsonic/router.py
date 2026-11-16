@@ -56,9 +56,7 @@ MAX_SEARCH_COUNT = 500
 ALBUM_FOLDER_PREFIX = "al-"
 
 
-# ----------------------------------------------------------------------
 # Вспомогательное
-# ----------------------------------------------------------------------
 def _ctx(request: Request) -> AppContext:
     return request.app.state.ctx
 
@@ -113,9 +111,7 @@ def _register(method: str, *paths: str) -> Callable:
     return decorator
 
 
-# ----------------------------------------------------------------------
 # Системные методы
-# ----------------------------------------------------------------------
 @_register("GET", "/ping.view", "/ping")
 async def ping(request: Request, auth: AuthContext = Depends(require_auth)) -> JSONResponse:
     """Проверка соединения и учётных данных. Самый первый вызов любого клиента."""
@@ -193,9 +189,7 @@ async def start_scan(
     )
 
 
-# ----------------------------------------------------------------------
 # Пользователи
-# ----------------------------------------------------------------------
 @_register("GET", "/getUser.view", "/getUser")
 async def get_user(
     request: Request,
@@ -253,9 +247,7 @@ async def get_users(
     return ok_response({"users": {"user": payload}}, api_version=_api(auth))
 
 
-# ----------------------------------------------------------------------
 # Исполнители и альбомы
-# ----------------------------------------------------------------------
 @_register("GET", "/getArtists.view", "/getArtists")
 async def get_artists(
     request: Request,
@@ -498,9 +490,7 @@ async def get_genres(
     return ok_response({"genres": {"genre": payload}}, api_version=_api(auth))
 
 
-# ----------------------------------------------------------------------
 # Поиск
-# ----------------------------------------------------------------------
 @_register("GET", "/search3.view", "/search3", "/search2.view", "/search2")
 async def search3(
     request: Request,
@@ -590,9 +580,7 @@ async def search_legacy(
     return ok_response({"searchResult": {"match": matches}}, api_version=_api(auth))
 
 
-# ----------------------------------------------------------------------
 # Бинарные методы: stream и download
-# ----------------------------------------------------------------------
 @_register("GET", "/stream.view", "/stream")
 async def subsonic_stream(
     request: Request,
@@ -691,9 +679,7 @@ def _pick_format(requested: str, max_bit_rate: str | None) -> str:
     return "mp3_128"
 
 
-# ----------------------------------------------------------------------
-# Плейлисты, избранное, оценки, scrobble (этап 4)
-# ----------------------------------------------------------------------
+# Плейлисты, избранное, оценки, scrobble
 _register("GET", "/getPlaylists.view", "/getPlaylists")(pl.get_playlists)
 _register("GET", "/getPlaylist.view", "/getPlaylist")(pl.get_playlist)
 _register("GET", "/createPlaylist.view", "/createPlaylist")(pl.create_playlist)
@@ -731,7 +717,6 @@ async def export_playlist_m3u(
 
 
 
-# ----------------------------------------------------------------------
 # Методы, которые клиенты вызывают, но данных для них у нас нет
 #
 # Раньше на них приходил 404 в формате FastAPI: {"detail": "Not Found"}.
@@ -741,7 +726,6 @@ async def export_playlist_m3u(
 # Отдаём валидный пустой ответ Subsonic: клиент видит «метод есть, данных нет».
 # Перечисляем явно, а не ловим всё подряд: перехват /rest/* перекрыл бы
 # getCoverArt, который регистрируется отдельным роутером ниже.
-# ----------------------------------------------------------------------
 async def _empty_ok(request: Request, auth: AuthContext = Depends(require_auth)) -> JSONResponse:
     return ok_response({}, api_version=_api(auth))
 

@@ -72,7 +72,6 @@ class CoverPass:
         self._finished: float | None = None
         self._album_started: float | None = None
 
-    # ------------------------------------------------------------------
     def set_activity(self, activity) -> None:
         """Источник «пользователь активен»: файл в worker-процессе, трекер в тестах."""
         self._activity = activity
@@ -129,7 +128,6 @@ class CoverPass:
             except asyncio.CancelledError:
                 pass
 
-    # ------------------------------------------------------------------
     async def _run(self, mode: str) -> None:
         self.state = "running"
         self.done = self.made = self.absent = self.failed = 0
@@ -237,7 +235,6 @@ class CoverPass:
         elif self.state == "error":
             logger.error("обложки: фаза прервана ошибкой: %s", self.last_error)
 
-    # ------------------------------------------------------------------
     def as_dict(self) -> dict[str, Any]:
         end = self._finished or time.monotonic()
         elapsed = round(end - self._started, 1) if self._started else None

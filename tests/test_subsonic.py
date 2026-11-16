@@ -69,9 +69,7 @@ def body(response: httpx.Response) -> dict:
     return response.json()["subsonic-response"]
 
 
-# ----------------------------------------------------------------------
 # ping: базовый контракт протокола
-# ----------------------------------------------------------------------
 async def test_ping_ok(api):
     client, _ = api
     r = await client.get("/rest/ping.view", params=auth_params())
@@ -90,9 +88,7 @@ async def test_ping_without_view_suffix(api):
     assert body(r)["status"] == "ok"
 
 
-# ----------------------------------------------------------------------
 # Три способа авторизации
-# ----------------------------------------------------------------------
 async def test_token_auth(api):
     client, _ = api
     r = await client.get("/rest/ping.view", params=auth_params())
@@ -239,9 +235,7 @@ async def test_token_uppercase_accepted(api):
     assert body(r)["status"] == "ok"
 
 
-# ----------------------------------------------------------------------
 # Троттлинг
-# ----------------------------------------------------------------------
 def test_throttle_blocks_after_failures():
     throttle = AuthThrottle()
     key = throttle_key("bob", "1.2.3.4")
@@ -282,9 +276,7 @@ async def test_throttle_returns_40_after_many_failures(api):
     assert body(r)["error"]["code"] == ErrorCode.WRONG_CREDENTIALS
 
 
-# ----------------------------------------------------------------------
 # Бинарные методы: честные HTTP-статусы
-# ----------------------------------------------------------------------
 async def test_stream_requires_auth_401(api, music_dir):
     client, app = api
     path = make_mp3(music_dir / "a.mp3")
@@ -321,7 +313,7 @@ async def test_stream_unknown_id_gives_subsonic_70(api):
 
 async def test_download_returns_original(api, music_dir):
     client, app = api
-    path = make_flac(music_dir / "c.flac")
+    make_flac(music_dir / "c.flac")
     await app.state.ctx.scanner.scan(mode="full")
     track = (await app.state.ctx.tracks.list_tracks())[0]
 
@@ -333,9 +325,7 @@ async def test_download_returns_original(api, music_dir):
     assert "attachment" in r.headers.get("content-disposition", "")
 
 
-# ----------------------------------------------------------------------
 # Библиотека
-# ----------------------------------------------------------------------
 @pytest.fixture
 async def lib(api, music_dir):
     """Библиотека: два исполнителя, три альбома, четыре трека."""
@@ -473,9 +463,7 @@ async def test_get_music_folders(lib):
     assert folders[0]["id"] == 1
 
 
-# ----------------------------------------------------------------------
 # Роли
-# ----------------------------------------------------------------------
 async def test_get_user_self(lib):
     client, _ = lib
     r = await client.get("/rest/getUser.view", params=auth_params())
@@ -528,9 +516,7 @@ async def test_get_license_valid(lib):
     assert body(r)["license"]["valid"] is True
 
 
-# ----------------------------------------------------------------------
 # Прямой /stream тоже закрыт
-# ----------------------------------------------------------------------
 async def test_direct_stream_requires_auth(api, music_dir):
     client, app = api
     path = make_mp3(music_dir / "d.mp3")
@@ -560,13 +546,11 @@ async def test_max_bit_rate_forces_downscale(api, music_dir):
     assert r.headers["X-MTR-Format"] == "mp3_128"
 
 
-# ----------------------------------------------------------------------
 # Идентификаторы больше 10 000
 #
 # Был баг: _int_param обрезал любой id до 10 000 (max(minimum, min(parsed, 10_000))).
 # Все треки с id > 10000 превращались в 10000, из-за чего в клиенте они «слипались»
 # в один и тот же трек. Здесь проверяем, что id проходит без искажений.
-# ----------------------------------------------------------------------
 async def test_high_track_id_is_not_clipped(api):
     client, app = api
     ctx = app.state.ctx
@@ -646,13 +630,11 @@ async def test_id_param_has_no_default_ceiling():
     assert _int_param("-5", default=0, name="id", minimum=1) == 1
 
 
-# ----------------------------------------------------------------------
 # Раздел «Исполнители»: методы, которые клиенты вызывают при его открытии
 #
 # Был баг: getMusicDirectory и getArtistInfo2 не были реализованы и отдавали
 # 404 в формате FastAPI ({"detail": "Not Found"}). Клиент показывал пустой
 # раздел, хотя альбомы и плейлисты работали.
-# ----------------------------------------------------------------------
 async def test_get_music_directory_returns_album_tracks(api):
     client, app = api
     ctx = app.state.ctx
@@ -796,14 +778,12 @@ async def test_cover_art_still_works_alongside_new_methods(api):
     assert len(r.content) > 1000
 
 
-# ----------------------------------------------------------------------
 # Исполнители, которые есть только в тегах треков
 #
 # Баг: список, поиск и getArtist учитывали только владельца альбома. Гость на
 # сборнике, фит и трек без альбома в Subsonic не появлялись вообще.
 # Баг 2: getIndexes отдавал id со числовым сдвигом, и getArtist по нему
 # отвечал «не найден».
-# ----------------------------------------------------------------------
 async def _seed_guest_library(ctx):
     from mutagen.id3 import ID3, TALB, TIT2, TPE1, TPE2
 
@@ -961,13 +941,11 @@ async def test_album_folder_with_prefix_returns_tracks(api):
     assert all(c["parent"] == f"al-{album_id}" for c in body["directory"]["child"])
 
 
-# ----------------------------------------------------------------------
 # Медленный getArtists/getIndexes на большой библиотеке
 #
 # Причина: без статистики SQLite выбирал план, который перебирает почти все
 # треки на каждого исполнителя (3.7 с на 20k треков). PRAGMA optimize и ANALYZE
 # при миграции держат план корректным.
-# ----------------------------------------------------------------------
 async def test_list_artists_uses_statistics_after_migration(api):
     import time
 

@@ -23,8 +23,6 @@ with sync_playwright() as p:
 
     def open_tab(view, name):
         try:
-            if page.locator("#menu-toggle").count():
-                page.click("#menu-toggle")
             page.click(f"[data-view='{view}']", timeout=4000)
             page.wait_for_timeout(1200)
             text = page.inner_text("#view")

@@ -42,9 +42,7 @@ def stamp_path(data_dir: Path) -> Path:
     return Path(data_dir) / "activity.stamp"
 
 
-# ----------------------------------------------------------------------
 # Команды (веб → worker)
-# ----------------------------------------------------------------------
 async def enqueue(db, kind: str, payload: dict[str, Any] | None = None) -> int:
     """Ставит команду в очередь. Неизвестный вид — ValueError."""
     if kind not in COMMAND_KINDS:
@@ -55,9 +53,7 @@ async def enqueue(db, kind: str, payload: dict[str, Any] | None = None) -> int:
     )
 
 
-# ----------------------------------------------------------------------
 # Статус (worker → веб)
-# ----------------------------------------------------------------------
 def write_status(path: Path, payload: dict[str, Any]) -> None:
     """Атомарная запись: читатель видит либо старый, либо новый файл целиком."""
     path = Path(path)
@@ -93,9 +89,7 @@ def worker_alive(status: dict[str, Any], now: float | None = None) -> bool:
     return current - heartbeat < HEARTBEAT_TTL_SEC
 
 
-# ----------------------------------------------------------------------
 # Активность (веб трогает, worker читает)
-# ----------------------------------------------------------------------
 class ActivityStamp:
     """Веб-сторона: отмечает пользовательский запрос файлом. Совместима с ActivityTracker.touch()."""
 

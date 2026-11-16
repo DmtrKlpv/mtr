@@ -18,7 +18,6 @@ with sync_playwright() as p:
     page.wait_for_timeout(1500)
 
     # Готовим несколько плейлистов, чтобы проверить список и поиск.
-    import json, urllib.request, http.cookiejar
     page.evaluate("""async () => {
       const csrf = document.body.dataset.csrf;
       for (const name of ['Рок', 'Джаз', 'Классика', 'Электроника']) {

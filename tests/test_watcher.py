@@ -10,13 +10,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from pathlib import Path
 
 import pytest
 
-from app.scanner.library_scanner import Scanner
 from app.scanner.watcher import (
     LibraryWatcher,
     PendingQueue,
@@ -26,9 +24,7 @@ from app.scanner.watcher import (
 from tests.conftest import make_mp3, tag_mp3
 
 
-# ----------------------------------------------------------------------
 # Фильтр событий
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize(
     "path,expected",
     [
@@ -56,9 +52,7 @@ def test_is_within_root_blocks_escape(tmp_path):
     assert not is_within_root("/etc/passwd", root)
 
 
-# ----------------------------------------------------------------------
 # Очередь
-# ----------------------------------------------------------------------
 def test_queue_deduplicates():
     q = PendingQueue()
     assert q.add(["a", "a", "b"]) == 2
@@ -85,9 +79,7 @@ def test_queue_overflow_flag(monkeypatch):
     assert overflow is True
 
 
-# ----------------------------------------------------------------------
 # Точечный скан: рекурсия и изоляция
-# ----------------------------------------------------------------------
 async def test_partial_scan_recurses_into_nested_subfolders(ctx, music_dir: Path):
     """Событие на каталог Artist обходит ВСЕ вложенные подпапки."""
     deep = music_dir / "Artist" / "Album" / "CD1"
@@ -183,9 +175,7 @@ async def test_full_scan_still_works_without_paths(ctx, music_dir: Path):
     assert result.counters.added == 1
 
 
-# ----------------------------------------------------------------------
 # Наблюдатель: жизненный цикл
-# ----------------------------------------------------------------------
 async def test_watcher_start_stop_is_clean(ctx, music_dir: Path):
     watcher = LibraryWatcher(
         ctx.scanner, music_dir, force_polling=True,

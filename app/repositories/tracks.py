@@ -150,9 +150,7 @@ class TrackRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    # ------------------------------------------------------------------
     # Справочники
-    # ------------------------------------------------------------------
     async def get_or_create_artist(self, name: str) -> int | None:
         """Возвращает id исполнителя, создавая его при необходимости."""
         from app.scanner.tag_parser import clean_text
@@ -221,9 +219,7 @@ class TrackRepository:
                 raise
             return int(row["id"])
 
-    # ------------------------------------------------------------------
     # Чтение треков
-    # ------------------------------------------------------------------
     async def get_by_id(self, track_id: int) -> TrackRow | None:
         row = await self._db.fetch_one("SELECT * FROM tracks WHERE id = ?", (track_id,))
         return _row_to_track(row) if row else None
@@ -279,7 +275,9 @@ class TrackRepository:
             or 0
         )
 
-    async def search(self, query: str, *, limit: int = 50) -> list[TrackRow]:
+    async def search(
+        self, query: str, *, limit: int = 50, with_genre: bool = False
+    ) -> list[TrackRow]:
         """Поиск по названию/артисту/альбому. LIKE с ESCAPE от инъекций."""
         cleaned = (query or "").strip()
         if not cleaned:
@@ -292,17 +290,21 @@ class TrackRepository:
         # mtr_fold с обеих сторон: без учёта регистра и без разницы е/ё.
         # Обычный LIKE в SQLite регистрозависим для кириллицы, поэтому «Ёлка»
         # не находилась по запросу «елка», а «QUEEN» — по «queen».
+        genre_clause = " OR mtr_fold(genre) LIKE mtr_fold(?) ESCAPE '\\'" if with_genre else ""
+        args = (like, like, like, like, limit) if with_genre else (like, like, like, limit)
         rows = await self._db.fetch_all(
             """
             SELECT * FROM tracks
              WHERE missing = 0
                AND (mtr_fold(title)  LIKE mtr_fold(?) ESCAPE '\\'
                  OR mtr_fold(artist) LIKE mtr_fold(?) ESCAPE '\\'
-                 OR mtr_fold(album)  LIKE mtr_fold(?) ESCAPE '\\')
+                 OR mtr_fold(album)  LIKE mtr_fold(?) ESCAPE '\\'"""
+            + genre_clause
+            + """)
              ORDER BY title COLLATE NOCASE
              LIMIT ?
             """,
-            (like, like, like, limit),
+            args,
         )
         return [_row_to_track(row) for row in rows]
 
@@ -327,9 +329,7 @@ class TrackRepository:
             for row in rows
         }
 
-    # ------------------------------------------------------------------
     # Запись
-    # ------------------------------------------------------------------
     def batch(self):
         """Общая транзакция для пачки записей (см. library_scanner._parse_batch)."""
         return self._db.transaction()
@@ -494,9 +494,7 @@ class TrackRepository:
         logger.warning("удалено %d отсутствующих треков вместе с позициями плейлистов", count)
         return count
 
-    # ------------------------------------------------------------------
     # Сканы
-    # ------------------------------------------------------------------
     async def start_scan_run(self, mode: str) -> int:
         """Регистрирует начало сканирования и возвращает его id."""
         if mode not in ("full", "incremental", "watch"):
@@ -585,9 +583,7 @@ class TrackRepository:
             "total_ms": int(row["total_ms"] or 0),
         }
 
-    # ------------------------------------------------------------------
     # Поиск для импорта плейлистов
-    # ------------------------------------------------------------------
     async def find_by_path(self, path: str) -> TrackRow | None:
         """Ищет трек по точному пути. Отсутствующие файлы не возвращаем."""
         row = await self._db.fetch_one(
@@ -636,9 +632,7 @@ class TrackRepository:
         rows = await self._db.fetch_all(sql, tuple(params))
         return [_row_to_track(row) for row in rows]
 
-    # ------------------------------------------------------------------
     # История прослушиваний (главная страница)
-    # ------------------------------------------------------------------
     async def recently_played(
         self, user_id: int, *, limit: int = 20
     ) -> list[TrackRow]:

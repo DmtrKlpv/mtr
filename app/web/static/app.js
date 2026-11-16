@@ -10,9 +10,6 @@ const state = {
   albums: [],
   view: 'library',
   libraryView: 'albums',   // artists | albums | playlists
-  // Выбранная буква рубрикатора, отдельно на каждую вкладку: переключение
-  // вкладок не должно сбрасывать чужой фильтр.
-  letters: { artists: '', albums: '', playlists: '' },
   starred: new Set(),
   queue: [],
   queueIndex: -1,
@@ -289,17 +286,7 @@ async function renderAlbumsView(view) {
   await renderAlbumsInto($('#library-body'));
 }
 
-// Переключатель вкладок библиотеки. Общий для главной и вида «Альбомы».
-/* ---------- Алфавитный рубрикатор ---------- */
-
-const ALPHABET = [
-  '0-9',
-  ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-  ...'АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ',
-  'Другие',
-];
-
-// Ответ на устаревший запрос не должен перерисовать уже выбранную букву.
+// Ответ на устаревший запрос не должен перерисовать уже выбранный вид.
 const renderTokens = new WeakMap();
 function beginRender(node) {
   const token = (renderTokens.get(node) || 0) + 1;
@@ -307,33 +294,7 @@ function beginRender(node) {
   return () => renderTokens.get(node) === token;
 }
 
-function letterQuery(letter) {
-  return letter ? `&letter=${encodeURIComponent(letter)}` : '';
-}
-
-function alphabetBar(current, onPick) {
-  return el('nav', { class: 'alpha-bar', 'aria-label': 'Алфавит' },
-    ...['', ...ALPHABET].map((key) => el('button', {
-      type: 'button',
-      class: 'alpha-btn' + (key === current ? ' active' : ''),
-      'aria-pressed': key === current ? 'true' : 'false',
-      onclick: () => onPick(key === current ? '' : key),
-    }, key || 'Все')),
-  );
-}
-
-function pickLetter(kind, letter) {
-  state.letters[kind] = letter;
-  const body = $('#library-body');
-  if (!body) return;
-  const draw = {
-    artists: renderArtistsInto,
-    albums: renderAlbumsInto,
-    playlists: renderPlaylistsInto,
-  }[kind];
-  draw(body).catch((error) => toast(error.message, 'error'));
-}
-
+// Переключатель вкладок библиотеки. Общий для главной и вида «Альбомы».
 function librarySwitcher() {
   return el('div', { class: 'segmented', role: 'tablist' },
     ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
@@ -454,18 +415,9 @@ const coverReady = (() => {
 /* ---------- Навигация ---------- */
 function setView(name) {
   state.view = name;
-  // Активный пункт — в левом рейле. Разделы настроек подсвечивают
-  // шестерёнку: иначе непонятно, что ты «внутри» меню.
-  const inRail = ['library', 'playlists', 'starred', 'recent'].includes(name);
   document.querySelectorAll('.rail-btn').forEach((btn) => {
-    const view = btn.dataset.view;
-    const active = view === name || (view === 'library' && inRail === false &&
-                                     btn.id === 'menu-toggle');
-    btn.classList.toggle('active', Boolean(view) && view === name);
+    btn.classList.toggle('active', Boolean(btn.dataset.view) && btn.dataset.view === name);
   });
-  const gear = document.querySelector('#menu-toggle');
-  if (gear) gear.classList.toggle('active', !inRail);
-  closeMenu();
   // Панель статуса скана опрашивает сервер раз в секунду. При уходе с
   // главной опрос нужно снять, иначе таймер живёт до перезагрузки страницы.
   // scan_import.js грузится после app.js, поэтому проверяем наличие функции.
@@ -476,6 +428,7 @@ function setView(name) {
     library: renderLibrary,
     albums: renderAlbumsView,
     playlists: renderPlaylists,
+    search: renderSearch,
     starred: renderStarred,
     recent: renderRecent,
     settings: renderSettings,
@@ -497,120 +450,10 @@ function setView(name) {
     });
 }
 
-function openMenu() {
-  const menu = $('#menu');
-  const toggle = $('#menu-toggle');
-  menu.hidden = false;
-  toggle.setAttribute('aria-expanded', 'true');
-}
-
-function closeMenu() {
-  const menu = $('#menu');
-  const toggle = $('#menu-toggle');
-  if (!menu || !toggle) return;
-  menu.hidden = true;
-  toggle.setAttribute('aria-expanded', 'false');
-}
-
 /* ---------- Библиотека ---------- */
 async function renderLibrary(view) {
   // Главная открывается сразу, даже во время скана: уже отсканированные альбомы
   // видны и доступны. Панель прогресса (скан и обложки) — сверху, см. mountHomeActivity.
-
-  const trackList = el('div', { class: 'list' });
-
-  // Поиск с отменой предыдущего запроса.
-  //
-  // Сервер больше не тормозит (агрегаты считаются один раз), но запросов всё равно
-  // много: по одному на паузу в наборе. Без отмены они копились в очереди, и сервер
-  // выглядел зависшим. Теперь каждый новый ввод отменяет предыдущий.
-  let searchController = null;
-  let searchSeq = 0;
-
-  const renderSearchResults = (results) => {
-    const tracks = results.tracks || [];
-    const albums = results.albums || [];
-    const artists = results.artists || [];
-    if (!tracks.length && !albums.length && !artists.length) {
-      trackList.replaceChildren(el('p', { class: 'muted' }, 'Ничего не найдено'));
-      return;
-    }
-    // Порядок разделов: исполнители, затем альбомы, затем треки — сначала то,
-    // что искали (имя исполнителя), в конце — длинный список отдельных треков.
-    const blocks = [];
-    if (artists.length) {
-      blocks.push(
-        el('h3', {}, `Исполнители (${artists.length})`),
-        el('div', { class: 'row wrap' },
-          ...artists.map((artist) => el('button', {
-            class: 'ghost small',
-            onclick: () => openArtist(artist.id),
-          }, artist.name)),
-        ),
-      );
-    }
-    if (albums.length) {
-      blocks.push(
-        el('h3', {}, `Альбомы (${albums.length})`),
-        el('div', { class: 'album-grid' },
-          ...albums.map((album) => el('button',
-            { class: 'album', onclick: () => openAlbum(album.id) },
-            coverImg('al', album.id, { className: 'album-cover' }),
-            el('span', { class: 'album-name' }, album.name),
-            el('span', { class: 'muted small' }, album.artist || ''),
-          )),
-        ),
-      );
-    }
-    if (tracks.length) {
-      blocks.push(
-        el('div', { class: 'row' },
-          el('span', { class: 'muted small' }, `Треков: ${tracks.length}`),
-          el('button', {
-            class: 'ghost small',
-            onclick: () => { enqueue(tracks); playIndex(0); },
-          }, 'Играть все'),
-        ),
-        ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 })),
-      );
-    }
-    trackList.replaceChildren(...blocks);
-  };
-
-  const search = el('input', {
-    type: 'search',
-    placeholder: 'Поиск по трекам, альбомам, исполнителям…',
-    class: 'search',
-    'aria-label': 'Поиск',
-    oninput: debounce(async (event) => {
-      // Поле могли перерисовать: сверяемся с текущим значением, а не с event.
-      const query = event.target.value.trim();
-      if (searchController) {
-        searchController.abort();
-        searchController = null;
-      }
-      if (!query) {
-        trackList.replaceChildren();
-        return;
-      }
-      const seq = ++searchSeq;
-      const controller = new AbortController();
-      searchController = controller;
-      trackList.replaceChildren(el('p', { class: 'muted' }, 'Поиск…'));
-      try {
-        const results = await api(
-          `/api/web/search?q=${encodeURIComponent(query)}`,
-          { signal: controller.signal },
-        );
-        if (seq !== searchSeq) return;   // ответ устарел: пришёл после нового ввода
-        renderSearchResults(results);
-      } catch (error) {
-        if (error && error.name === 'AbortError') return;
-        if (seq !== searchSeq) return;
-        trackList.replaceChildren(el('p', { class: 'error' }, error.message));
-      }
-    }, 300),
-  });
 
   const summary = el('div', { class: 'cards' });
   const switcher = librarySwitcher();
@@ -620,9 +463,7 @@ async function renderLibrary(view) {
   view.replaceChildren(
     el('h1', { class: 'greeting' }, `Привет, ${state.user}!`),
     // Кнопки сканирования живут в разделе «Сканирование»: на главной их больше нет.
-    el('div', { class: 'row' }, search),
     homeActivityBox(),
-    trackList,
     summary,
     el('div', { id: 'home-sections' }),
     el('div', { class: 'section-head' }, el('h2', {}, 'Библиотека')),
@@ -692,9 +533,7 @@ const PAGE_SIZE = 60;
 
 async function renderAlbumsInto(node) {
   const isCurrent = beginRender(node);
-  const letter = state.letters.albums;
-  const bar = alphabetBar(letter, (picked) => pickLetter('albums', picked));
-  fill(node, bar, loadingNote());
+  fill(node, loadingNote());
 
   let offset = 0;
   let total = 0;
@@ -711,7 +550,7 @@ async function renderAlbumsInto(node) {
     more.disabled = true;
     let data;
     try {
-      data = await api(`/api/web/albums?limit=${PAGE_SIZE}&offset=${offset}${letterQuery(letter)}`);
+      data = await api(`/api/web/albums?limit=${PAGE_SIZE}&offset=${offset}`);
     } catch (error) {
       more.disabled = false;
       toast(error.message, 'error');
@@ -724,9 +563,7 @@ async function renderAlbumsInto(node) {
 
     if (!items.length && offset === 0) {
       empty = true;
-      fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
-        ? `Нет альбомов на «${letter}»`
-        : 'Библиотека пуста — запустите сканирование'));
+      fill(node, el('p', { class: 'muted' }, 'Библиотека пуста — запустите сканирование'));
       return;
     }
 
@@ -747,14 +584,12 @@ async function renderAlbumsInto(node) {
 
   await loadPage();
   if (!isCurrent() || empty) return;
-  fill(node, bar, grid, footer);
+  fill(node, grid, footer);
 }
 
 async function renderArtistsInto(node) {
   const isCurrent = beginRender(node);
-  const letter = state.letters.artists;
-  const bar = alphabetBar(letter, (picked) => pickLetter('artists', picked));
-  fill(node, bar, loadingNote());
+  fill(node, loadingNote());
 
   let offset = 0;
   let total = 0;
@@ -771,7 +606,7 @@ async function renderArtistsInto(node) {
     more.disabled = true;
     let data;
     try {
-      data = await api(`/api/web/artists?limit=${PAGE_SIZE}&offset=${offset}${letterQuery(letter)}`);
+      data = await api(`/api/web/artists?limit=${PAGE_SIZE}&offset=${offset}`);
     } catch (error) {
       more.disabled = false;
       toast(error.message, 'error');
@@ -784,9 +619,7 @@ async function renderArtistsInto(node) {
 
     if (!items.length && offset === 0) {
       empty = true;
-      fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
-        ? `Нет исполнителей на «${letter}»`
-        : 'Исполнителей нет'));
+      fill(node, el('p', { class: 'muted' }, 'Исполнителей нет'));
       return;
     }
 
@@ -812,7 +645,7 @@ async function renderArtistsInto(node) {
 
   await loadPage();
   if (!isCurrent() || empty) return;
-  fill(node, bar, grid, footer);
+  fill(node, grid, footer);
 }
 
 async function openArtist(artistId) {
@@ -1043,6 +876,161 @@ async function renderRecent(view) {
       ...queue.map((track, i) => trackRow(track, { queue, index: i + 1 })),
     ),
   );
+}
+
+/* ---------- Поиск: отдельная страница ---------- */
+
+// Один запрос на все четыре группы. Смена вкладки перерисовывает только левую
+// колонку из уже полученного ответа; треки справа при этом не перестраиваются.
+const SEARCH_TABS = ['artists', 'albums', 'playlists'];
+const SEARCH_TAB_NAMES = { artists: 'Артисты', albums: 'Альбомы', playlists: 'Плейлисты' };
+const SEARCH_HINT = 'Введите название, исполнителя, альбом, плейлист или жанр';
+
+function searchSummary(results) {
+  const { artists, albums, playlists, tracks } = results;
+  if (!artists.length && !albums.length && !playlists.length && !tracks.length) {
+    return 'Ничего не найдено';
+  }
+  return `Треков: ${tracks.length} · альбомов: ${albums.length} · `
+    + `исполнителей: ${artists.length} · плейлистов: ${playlists.length}`;
+}
+
+function searchTabs(current, results, onPick) {
+  return el('div', { class: 'segmented', role: 'tablist' },
+    ...SEARCH_TABS.map((kind) => el('button', {
+      class: 'segment' + (kind === current ? ' active' : ''),
+      role: 'tab',
+      'aria-selected': kind === current ? 'true' : 'false',
+      onclick: () => onPick(kind),
+    }, `${SEARCH_TAB_NAMES[kind]} (${results[kind].length})`)),
+  );
+}
+
+function searchPane(kind, results) {
+  const items = results[kind];
+  if (!items.length) return el('p', { class: 'muted' }, 'Ничего не найдено');
+  if (kind === 'artists') {
+    return el('div', { class: 'artist-grid' }, ...items.map((artist) => el('button', {
+      class: 'artist',
+      title: artist.name,
+      onclick: () => openArtist(artist.id),
+    },
+      artistAvatar(artist),
+      el('span', { class: 'artist-name' }, artist.name),
+      el('span', { class: 'artist-meta' }, artist.album_count ? `${artist.album_count} альб.` : ''),
+    )));
+  }
+  if (kind === 'albums') {
+    return el('div', { class: 'album-grid' }, ...items.map((album) => el('button', {
+      class: 'album',
+      onclick: () => openAlbum(album.id),
+    },
+      coverImg('al', album.id, { className: 'album-cover' }),
+      el('span', { class: 'album-name' }, album.name),
+      el('span', { class: 'album-artist' }, album.artist || ''),
+    )));
+  }
+  return el('div', { class: 'pl-list' }, ...items.map((playlist) => el('button', {
+    class: 'pl-item',
+    onclick: () => { selectedPlaylistId = playlist.id; setView('playlists'); },
+  },
+    el('span', { class: 'ellipsis' }, playlist.name),
+    el('span', { class: 'muted tiny' }, String(playlist.song_count)),
+  )));
+}
+
+function searchTracks(tracks) {
+  if (!tracks) return el('div', {});
+  if (!tracks.length) return el('div', {}, el('p', { class: 'muted' }, 'Ничего не найдено'));
+  return el('div', {},
+    el('div', { class: 'search-col-head' },
+      el('h3', {}, 'Треки'),
+      el('span', { class: 'muted small' }, String(tracks.length)),
+      el('button', {
+        class: 'ghost small',
+        onclick: () => { enqueue(tracks); playIndex(0); },
+      }, 'Играть все'),
+    ),
+    el('div', { class: 'list' },
+      ...tracks.map((track, i) => trackRow(track, { queue: tracks, index: i + 1 }))),
+  );
+}
+
+async function renderSearch(view) {
+  let tab = 'artists';
+  let results = null;
+  let controller = null;
+  let seq = 0;
+  let composing = false;
+
+  const status = el('p', { class: 'muted small' });
+  const tabsBox = el('div');
+  const paneBox = el('div');
+  const tracksBox = el('div');
+
+  const drawTabs = () => fill(tabsBox, results && searchTabs(tab, results, pick));
+  const drawPane = () => fill(paneBox, results && searchPane(tab, results));
+  const drawTracks = () => fill(tracksBox, searchTracks(results ? results.tracks : null));
+  const drawAll = () => { drawTabs(); drawPane(); drawTracks(); };
+  const pick = (kind) => { tab = kind; drawTabs(); drawPane(); };
+
+  const run = async () => {
+    const query = input.value.trim();
+    if (controller) controller.abort();
+    controller = null;
+    const mine = ++seq;
+    if (!query) {
+      results = null;
+      fill(status);
+      drawAll();
+      return;
+    }
+    controller = new AbortController();
+    fill(status, el('span', { class: 'search-spinner', 'aria-hidden': 'true' }), 'Поиск…');
+    try {
+      const data = await api(`/api/web/search?q=${encodeURIComponent(query)}`, {
+        signal: controller.signal,
+      });
+      if (mine !== seq) return;
+      results = {
+        artists: data.artists || [],
+        albums: data.albums || [],
+        playlists: data.playlists || [],
+        tracks: data.tracks || [],
+      };
+      fill(status, searchSummary(results));
+      drawAll();
+    } catch (error) {
+      if (error.name === 'AbortError' || mine !== seq || error.message === 'unauthorized') return;
+      fill(status, 'Ошибка поиска');
+      toast(error.message, 'error');
+    }
+  };
+  const schedule = debounce(run, 300);
+
+  const input = el('input', {
+    type: 'search',
+    class: 'search',
+    maxlength: 200,
+    placeholder: SEARCH_HINT,
+    'aria-label': 'Поиск по названию и тегам',
+    autocomplete: 'off',
+    oninput: (event) => { if (!composing && !event.isComposing) schedule(); },
+    oncompositionstart: () => { composing = true; },
+    oncompositionend: () => { composing = false; schedule(); },
+  });
+
+  fill(view,
+    el('h2', {}, 'Поиск'),
+    el('div', { class: 'row' }, input),
+    status,
+    el('div', { class: 'search-split' },
+      el('section', { class: 'search-col' }, tabsBox, paneBox),
+      el('section', { class: 'search-col' }, tracksBox),
+    ),
+  );
+  drawAll();
+  input.focus();
 }
 
 /* ---------- Строка трека ---------- */
@@ -1367,20 +1355,16 @@ async function renderPlaylists(view) {
 
 async function renderPlaylistsInto(node) {
   const isCurrent = beginRender(node);
-  const letter = state.letters.playlists;
-  const bar = alphabetBar(letter, (picked) => pickLetter('playlists', picked));
-  fill(node, bar, loadingNote());
+  fill(node, loadingNote());
 
-  const data = await api(`/api/web/playlists${letter ? `?letter=${encodeURIComponent(letter)}` : ''}`);
+  const data = await api('/api/web/playlists');
   if (!isCurrent()) return;
   const items = data.items || [];
   if (!items.length) {
-    fill(node, letter ? bar : null, el('p', { class: 'muted' }, letter
-      ? `Нет плейлистов на «${letter}»`
-      : 'Плейлистов пока нет'));
+    fill(node, el('p', { class: 'muted' }, 'Плейлистов пока нет'));
     return;
   }
-  fill(node, bar, el('div', { class: 'pl-list' },
+  fill(node, el('div', { class: 'pl-list' },
     ...items.map((playlist) => el('button', {
       class: 'pl-item',
       onclick: () => { selectedPlaylistId = playlist.id; setView('playlists'); },
@@ -1507,30 +1491,40 @@ async function renderStarred(view) {
   );
 }
 /* ---------- Настройки ---------- */
+const SETTINGS_SECTIONS = [
+  { id: 'interface', title: 'Интерфейс', text: 'Что открывается при входе и как выглядит приложение.' },
+  { id: 'playback', title: 'Воспроизведение', text: 'В каком формате отдаются треки и сколько потоков перекодируется одновременно.' },
+  { id: 'scan', title: 'Сканирование библиотеки', text: 'Как MTR читает файлы и теги при сканировании.' },
+  { id: 'watch', title: 'Слежение за файлами', text: 'Как быстро MTR замечает изменения в папке с музыкой.' },
+  { id: 'covers', title: 'Обложки', text: 'Откуда берутся обложки и как они загружаются в фоне.' },
+  { id: 'playlists', title: 'Плейлисты', text: 'Где искать файлы .m3u и как исправлять пути внутри них.' },
+  { id: 'server', title: 'Сервер', text: 'Журнал, cookie и совместимость с клиентами Subsonic.' },
+];
+
 async function renderSettings(view) {
   const data = await api('/api/web/settings');
   const items = data.items || [];
   const isAdmin = state.role === 'admin';
 
-  const rows = items.map((item) => {
+  const renderItem = (item) => {
     let control;
     if (item.kind === 'bool') {
       control = el('input', { type: 'checkbox', checked: item.value ? 'checked' : null });
-      control.dataset.key = item.key;
     } else if (item.kind === 'choice') {
       control = el('select', {},
         ...item.choices.map((choice) => el('option',
           { value: choice, selected: choice === item.value ? 'selected' : null },
           choiceLabel(choice))),
       );
-      control.dataset.key = item.key;
+    } else if (item.kind === 'text') {
+      control = el('input', { type: 'text', value: String(item.value), maxlength: 512 });
     } else {
       control = el('input', {
         type: 'number', value: String(item.value),
         min: item.minimum ?? null, max: item.maximum ?? null,
       });
-      control.dataset.key = item.key;
     }
+    control.dataset.key = item.key;
     control.disabled = !isAdmin;
 
     return el('div', { class: 'setting' },
@@ -1545,7 +1539,23 @@ async function renderSettings(view) {
       ),
       el('div', { class: 'setting-control' }, control),
     );
-  });
+  };
+
+  const known = new Set(SETTINGS_SECTIONS.map((section) => section.id));
+  const groups = SETTINGS_SECTIONS.map((section) => ({
+    ...section,
+    items: items.filter((item) => item.section === section.id),
+  }));
+  const rest = items.filter((item) => !known.has(item.section));
+  if (rest.length) groups.push({ title: 'Прочее', text: '', items: rest });
+
+  const sections = groups
+    .filter((group) => group.items.length)
+    .map((group) => el('section', { class: 'settings-section' },
+      el('h3', {}, group.title),
+      group.text ? el('p', { class: 'muted small' }, group.text) : null,
+      el('div', { class: 'settings' }, ...group.items.map(renderItem)),
+    ));
 
   const saveButton = isAdmin ? el('button', {
     class: 'primary',
@@ -1591,8 +1601,8 @@ async function renderSettings(view) {
     ...safeChildren(isAdmin ? null : el('p', { class: 'muted' }, 'Изменять настройки может только администратор.')),
     el('p', { class: 'muted small' },
       'Сохранённые здесь значения главнее переменных окружения. ' +
-      'Пункты с пометкой «после перезапуска» вступают в силу после перезапуска контейнера.'),
-    el('div', { class: 'settings' }, ...rows),
+      'Пункты с пометкой «после перезапуска» вступают в силу только после перезапуска контейнера.'),
+    ...sections,
     el('div', { class: 'row' }, saveButton),
     el('h3', {}, 'Параметры запуска'),
     el('p', { class: 'muted small' },
@@ -1612,6 +1622,7 @@ function choiceLabel(choice) {
   return {
     artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты',
     raw: 'Без перекодирования', flac: 'FLAC', alac: 'ALAC',
+    mp3_128: 'MP3 128 кбит/с', mp3_256: 'MP3 256 кбит/с', mp3_320: 'MP3 320 кбит/с', mp3_v0: 'MP3 V0 (переменный битрейт)',
     blue: 'Синий', green: 'Зелёный', violet: 'Фиолетовый', orange: 'Оранжевый',
     teal: 'Бирюзовый', pink: 'Розовый', red: 'Красный',
     DEBUG: 'DEBUG (подробно)', INFO: 'INFO', WARNING: 'WARNING',
@@ -2017,38 +2028,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (state.role !== 'admin') node.hidden = true;
   });
 
-  // Меню настроек: шестерёнка открывает список разделов.
-  const toggle = $('#menu-toggle');
-  toggle.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const menu = $('#menu');
-    if (menu.hidden) openMenu(); else closeMenu();
-  });
-  document.addEventListener('click', (event) => {
-    if (!event.target.closest('#menu, #menu-toggle')) closeMenu();
-  });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') closeMenu();
-  });
-  $('#menu').addEventListener('click', (event) => {
-    const item = event.target.closest('.menu-item');
-    if (!item) return;
-    if (item.id === 'logout') return;
-    if (item.dataset.view) setView(item.dataset.view);
-  });
-
   // Навигация — левый рейл. #tabs больше нет: все разделы переехали сюда,
   // в шапке осталось только имя пользователя.
   $('#rail').addEventListener('click', (event) => {
     const btn = event.target.closest('.rail-btn');
     if (!btn) return;
-    if (btn.dataset.action === 'search') {
-      // Кнопка поиска фокусирует поле на текущей странице, а не уводит
-      // в отдельный раздел: поиск есть только в «Библиотеке».
-      const box = document.querySelector('.search');
-      if (box) { box.focus(); box.select(); }
-      return;
-    }
     if (btn.dataset.view) setView(btn.dataset.view);
   });
 
@@ -2106,7 +2090,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   audio.addEventListener('timeupdate', () => {
     if (!audio.duration) return;
-    $('#seek').value = String((audio.currentTime / audio.duration) * 1000);
+    const seek = $('#seek');
+    seek.value = String((audio.currentTime / audio.duration) * 1000);
+    seek.style.setProperty('--seek-fill', `${seek.value / 10}%`);
     $('#time').textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
   });
   audio.addEventListener('ended', () => {
@@ -2120,6 +2106,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   $('#seek').addEventListener('input', (event) => {
+    event.target.style.setProperty('--seek-fill', `${event.target.value / 10}%`);
     if (!audio.duration) return;
     audio.currentTime = (event.target.value / 1000) * audio.duration;
   });

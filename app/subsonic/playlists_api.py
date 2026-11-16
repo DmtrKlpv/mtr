@@ -40,10 +40,6 @@ def _ctx(request: Request) -> AppContext:
     return request.app.state.ctx
 
 
-def _playlists(request: Request) -> PlaylistRepository:
-    return request.app.state.ctx.playlists
-
-
 def _int(value: str | None, *, default: int = 0, name: str = "id") -> int:
     if value is None or not str(value).strip():
         return default
@@ -111,9 +107,7 @@ async def _editable_playlist(
     return playlist
 
 
-# ----------------------------------------------------------------------
 # Плейлисты
-# ----------------------------------------------------------------------
 async def get_playlists(
     request: Request,
     auth: AuthContext = Depends(require_auth),
@@ -308,9 +302,7 @@ async def delete_playlist(
     return ok_response({}, api_version=auth.api_version)
 
 
-# ----------------------------------------------------------------------
 # Избранное и оценки
-# ----------------------------------------------------------------------
 async def star(
     request: Request,
     auth: AuthContext = Depends(require_auth),
@@ -467,9 +459,7 @@ async def scrobble(
     return ok_response({}, api_version=auth.api_version)
 
 
-# ----------------------------------------------------------------------
 # Импорт/экспорт M3U8
-# ----------------------------------------------------------------------
 async def export_playlist_m3u8(
     ctx: AppContext, auth: AuthContext, playlist_id: int
 ) -> tuple[str, str]:
